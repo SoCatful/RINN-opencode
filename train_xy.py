@@ -16,6 +16,14 @@ import csv
 torch.manual_seed(42)
 np.random.seed(42)
 
+# ============== 创建训练输出文件夹 ==============
+# 每次训练创建独立的输出文件夹
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+experiment_name = f"rinne_training_{timestamp}"
+checkpoint_dir = os.path.join('model_checkpoints_rinn', experiment_name)
+os.makedirs(checkpoint_dir, exist_ok=True)
+print(f'本次训练输出文件夹: {checkpoint_dir}')
+
 # 设置环境变量
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
@@ -26,9 +34,9 @@ print('使用设备:', device)
 # ============== 数据加载与预处理 ==============
 print('\n=== 加载数据 ===')
 
-# 加载预处理的数据
-x_samples = np.load('d:/1事务/1论文/微波设计/RINN-dev/RINN-dev/x_samples.npy', allow_pickle=True)
-y_data = np.load('d:/1事务/1论文/微波设计/RINN-dev/RINN-dev/y_data.npy')
+# 加载预处理的数据（从data文件夹）
+x_samples = np.load('data/x_samples.npy', allow_pickle=True)
+y_data = np.load('data/y_data.npy')
 
 print('X样本数:', len(x_samples))
 print('X形状:', x_samples.shape)
@@ -46,7 +54,7 @@ def load_x_samples_from_csv(csv_path):
                     samples.append(cell.strip())
     return samples
 
-x_samples = load_x_samples_from_csv('d:/1事务/1论文/微波设计/RINN-dev/RINN-dev/X.csv')
+x_samples = load_x_samples_from_csv('data/X.csv')
 print('从CSV读取的X样本数:', len(x_samples))
 
 # 解析X样本字符串为数值特征
@@ -114,10 +122,10 @@ print('  训练集: %d 样本' % len(x_train))
 print('  验证集: %d 样本' % len(x_val))
 print('  X维度: %d, Y维度: %d, Z_real维度: %d' % (x_train.shape[1], y_train.shape[1], z_real_train.shape[1]))
 
-# 创建DataLoader（只包含x和y，z_real会在损失计算时生成）
+# 创建DataLoader（包含x, y和z_real，保持与rinn_main.py一致）
 batch_size = 8
-train_dataset = TensorDataset(x_train, y_train)
-val_dataset = TensorDataset(x_val, y_val)
+train_dataset = TensorDataset(x_train, y_train, z_real_train)
+val_dataset = TensorDataset(x_val, y_val, z_real_val)
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -158,26 +166,58 @@ print('\n=== 训练配置 ===')
 
 # 权重系数（调整Ly权重，因为真实数据Ly值很大）
 w_x = 1.0
-w_y = 0.01  # 大幅降低Ly权重
+w_y = 1.0 # 大幅降低Ly权重
 w_z = 1.0
 clip_value = 0.5  # 加强梯度裁剪
 
 # 优化器（降低学习率以稳定训练）
-optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+lr = 1e-3
+weight_decay = 2e-5
+optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
 # 训练参数
-num_epochs = 500  # 增加训练轮数
+num_epochs = 200  # 增加训练轮数
 best_val_loss = float('inf')
-patience = 100   # 增加早停耐心
+patience = 50   # 增加早停耐心
 patience_counter = 0
 
-# 创建检查点目录
-checkpoint_dir = 'model_checkpoints_rinn'
-os.makedirs(checkpoint_dir, exist_ok=True)
+# 检查点目录已在上方创建
 
 # 训练历史
 train_losses = {'total': [], 'Lx': [], 'Ly': [], 'Lz': []}
 val_losses = {'total': [], 'Lx': [], 'Ly': [], 'Lz': []}
+
+# 保存训练配置信息
+training_info = {
+    'timestamp': timestamp,
+    'model_config': {
+        'input_dim': model_input_dim,
+        'hidden_dim': 8,
+        'num_blocks': 1,
+        'num_stages': 1,
+        'num_cycles_per_stage': 1
+    },
+    'training_params': {
+        'batch_size': batch_size,
+        'learning_rate': lr,
+        'weight_decay': weight_decay,
+        'clip_value': clip_value,
+        'num_epochs': num_epochs,
+        'loss_weights': {'w_x': w_x, 'w_y': w_y, 'w_z': w_z}
+    },
+    'data_info': {
+        'train_samples': len(x_train),
+        'val_samples': len(x_val),
+        'x_dim': x_train.shape[1],
+        'y_dim': y_train.shape[1],
+        'z_dim': z_real_train.shape[1]
+    }
+}
+
+# 保存训练配置
+import json
+with open(os.path.join(checkpoint_dir, 'training_config.json'), 'w', encoding='utf-8') as f:
+    json.dump(training_info, f, ensure_ascii=False, indent=2)
 
 print('开始训练...')
 start_time = datetime.now()
@@ -216,12 +256,10 @@ for epoch in range(num_epochs):
     model.train()
     epoch_train_losses = {"total_loss": 0.0, "Lx": 0.0, "Ly": 0.0, "Lz": 0.0}
     
-    for batch_x, batch_y in train_loader:
+    for batch_x, batch_y, batch_z_real in train_loader:
         batch_x = batch_x.to(device)
         batch_y = batch_y.to(device)
-        
-        # 创建200维标准正态分布的z_real（每个batch重新生成）
-        z_real = torch.randn_like(batch_x)  # 与batch_x相同形状的标准正态分布
+        batch_z_real = batch_z_real.to(device)
         
         # 正向映射：模型输入只有x（200维）
         # 返回: y_forward（最终输出，用于y_loss）, log_det_forward, z_from_realnvp（RealNVP输出，用于z_loss）
@@ -240,7 +278,7 @@ for epoch in range(num_epochs):
         losses = calculate_total_loss(
             batch_x, x_recon, 
             batch_y, y_pred, 
-            z_real, z_recon, 
+            batch_z_real, z_recon, 
             log_det_total=log_det_forward
         )
         
@@ -283,12 +321,10 @@ for epoch in range(num_epochs):
     epoch_val_losses = {"total_loss": 0.0, "Lx": 0.0, "Ly": 0.0, "Lz": 0.0}
     
     with torch.no_grad():
-        for batch_x, batch_y in val_loader:
+        for batch_x, batch_y, batch_z_real in val_loader:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
-            
-            # 创建200维标准正态分布的z_real（验证阶段）
-            z_real = torch.randn_like(batch_x)
+            batch_z_real = batch_z_real.to(device)
             
             # 正向映射：模型输入只有x（200维）
             # 返回: y_forward（最终输出，用于y_loss）, log_det_forward, z_from_realnvp（RealNVP输出，用于z_loss）
@@ -305,9 +341,9 @@ for epoch in range(num_epochs):
             
             # 计算损失
             losses = calculate_total_loss(
-                batch_x, x_recon,
-                batch_y, y_pred,
-                z_real, z_recon,
+                batch_x, x_recon, 
+                batch_y, y_pred, 
+                batch_z_real, z_recon, 
                 log_det_total=log_det_forward
             )
             
@@ -423,23 +459,52 @@ print('\n=== 模型评估 ===')
 
 model.eval()
 with torch.no_grad():
-    # 生成测试样本的预测（模型只接受x作为输入）
-    x_test = x_val[:3].to(device)
+    # 生成更多测试样本的预测
+    test_samples = min(10, len(x_val))  # 最多测试10个样本
+    x_test = x_val[:test_samples].to(device)
     y_pred = model(x_test)[0].cpu().numpy()
     
-    # 反标准化（只使用前200维Y数据）
+    # 反标准化
     y_pred_original = y_pred * y_std + y_mean
-    y_true_original = y_val[:3, :200].numpy() * y_std + y_mean
+    y_true_original = y_val[:test_samples, :200].numpy() * y_std + y_mean
+    
+    # 保存预测结果数据
+    np.save(os.path.join(checkpoint_dir, 'y_pred_test.npy'), y_pred_original)
+    np.save(os.path.join(checkpoint_dir, 'y_true_test.npy'), y_true_original)
+    np.save(os.path.join(checkpoint_dir, 'x_test.npy'), x_test.cpu().numpy())
+    
+    # 计算评估指标
+    mse = np.mean((y_true_original - y_pred_original) ** 2)
+    mae = np.mean(np.abs(y_true_original - y_pred_original))
+    mape = np.mean(np.abs((y_true_original - y_pred_original) / (np.abs(y_true_original) + 1e-8))) * 100
+    
+    # 保存评估报告
+    eval_report = {
+        'test_samples': test_samples,
+        'mse': float(mse),
+        'mae': float(mae),
+        'mape': float(mape),
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    with open(os.path.join(checkpoint_dir, 'evaluation_report.json'), 'w', encoding='utf-8') as f:
+        json.dump(eval_report, f, ensure_ascii=False, indent=2)
     
     # 绘制预测结果
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    for i in range(3):
+    fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+    axes = axes.flatten()
+    for i in range(test_samples):
         axes[i].plot(y_true_original[i], label='True', color='blue', alpha=0.7)
         axes[i].plot(y_pred_original[i], label='Predicted', color='red', linestyle='--', alpha=0.7)
         axes[i].set_xlabel('Frequency Point')
         axes[i].set_ylabel('Value')
-        axes[i].set_title(f'Sample {i+1}')
+        axes[i].set_title(f'Test Sample {i+1}')
         axes[i].legend()
+        axes[i].grid(True, alpha=0.3)
+    
+    # 隐藏多余的子图
+    for i in range(test_samples, len(axes)):
+        axes[i].set_visible(False)
         axes[i].grid(True, alpha=0.3)
     
     plt.suptitle('RINN Model Predictions vs True Values')
