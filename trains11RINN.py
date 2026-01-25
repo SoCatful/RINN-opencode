@@ -587,8 +587,8 @@ print('Training curves saved to:', os.path.join(checkpoint_dir, 'training_losses
 # ============== 模型功能实现：固定x预测y ==============
 print('\n=== Fixed x predicting y functionality ===')
 
-# 从验证集中选取三个测试样本
-test_indices = [0, 10, 20]  # 三个不同的测试样本索引
+# 从验证集中选取五个测试样本
+test_indices = [0, 10, 20, 30, 40]  # 五个不同的测试样本索引
 
 for i, test_idx in enumerate(test_indices):
     print(f'\nPredicting y for test sample {i+1}:')
@@ -633,8 +633,8 @@ for i, test_idx in enumerate(test_indices):
 # ============== 模型功能实现：固定y回推x ==============
 print('\n=== Fixed y backward predicting x functionality ===')
 
-# 从验证集中选取三个测试样本
-y_test_indices = [0, 10, 20]  # 三个不同的测试样本索引
+# 从验证集中选取五个测试样本
+y_test_indices = [0, 10, 20, 30, 40]  # 五个不同的测试样本索引
 
 for i, y_test_idx in enumerate(y_test_indices):
     print(f'\nBackward predicting x for test sample {i+1}:')
@@ -664,19 +664,45 @@ for i, y_test_idx in enumerate(y_test_indices):
     print(f'    Real x: {real_x[0]}')
     print(f'    Backward x: {reconstructed_x[0]}')
 
-    # 可视化x的真实值与回推值对比
-    plt.figure(figsize=(10, 6))
+    # 使用回推的x进行正向预测，验证一致性
+    with torch.no_grad():
+        # 左侧输入：回推的X + 零填充
+        left_test_input = np.concatenate((reconstructed_x_normalized.cpu().numpy(), np.zeros((1, padding_dim), dtype=np.float32)), axis=1)
+        left_test_input = torch.FloatTensor(left_test_input).to(device)
+        
+        # 正向预测
+        predicted_right, _, _ = model(left_test_input, return_intermediate=True)
+        predicted_y_normalized = predicted_right[:, :y_dim]
+        predicted_y = predicted_y_normalized.cpu().numpy() * y_std + y_mean
+
+    # 获取真实的y值
+    real_y = val_y[y_test_idx:y_test_idx+1]
+
+    # 可视化：将x分布和y预测拼到一起
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [1, 2]})
+    
+    # 第一个子图：x参数对比
     grid = np.arange(x_dim)
     width = 0.35
-
-    plt.bar(grid - width/2, real_x[0], width, label='Real x', color='blue')
-    plt.bar(grid + width/2, reconstructed_x[0], width, label='Backward x', color='red')
-    plt.xlabel('Geometry Parameter Index')
-    plt.ylabel('Parameter Value')
-    plt.title(f'Comparison of x backward result with fixed y - Sample {i+1}')
-    plt.xticks(grid)
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    
+    ax1.bar(grid - width/2, real_x[0], width, label='Real x', color='blue')
+    ax1.bar(grid + width/2, reconstructed_x[0], width, label='Backward x', color='red')
+    ax1.set_xlabel('Geometry Parameter Index')
+    ax1.set_ylabel('Parameter Value')
+    ax1.set_title(f'X Parameters Comparison - Sample {i+1}')
+    ax1.set_xticks(grid)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 第二个子图：y预测对比
+    ax2.plot(freq_data[:y_dim], real_y[0], label='Real y', color='blue', linewidth=2)
+    ax2.plot(freq_data[:y_dim], predicted_y[0], label='Predicted y (from backward x)', color='red', linestyle='--', linewidth=2)
+    ax2.set_xlabel('Frequency (GHz)')
+    ax2.set_ylabel('S11 (dB)')
+    ax2.set_title(f'Y Prediction Consistency - Sample {i+1}')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.savefig(os.path.join(checkpoint_dir, f'fixed_y_backward_x_{i+1}.png'), dpi=150, bbox_inches='tight')
     plt.close()
