@@ -48,4 +48,4 @@ class JLLayer(nn.Module):
             # 这里用 -1e6 作为惩罚值，避免 -inf 导致数值问题
             # torch.full_like，生成一个新张量，其形状、数据类型、存储设备（CPU / GPU）完全和logabsdet一致
             logabsdet = torch.where(sign == 0, torch.full_like(logabsdet, -1e6), logabsdet)
-        return logabsdet.expand(x.shape[0])#扩展为一组数，为什么？？？？？？
+        return logabsdet.expand(x.shape[0])

@@ -14,10 +14,12 @@ Y_FILE_PATH = 'data/S Parameter Plot1perfect.csv'
 NUM_SAMPLES = 3
 
 # 最佳模型所在目录
-MODEL_DIR = 'model_checkpoints_rinn/rinn_correct_structure_20260208_104358'
+# MODEL_DIR = 'model_checkpoints_rinn/rinn_correct_structure_20260208_104358'
+MODEL_DIR = 'model_checkpoints_rinn/rinn_correct_structure_20260211_173912'
 
-# 输出结果目录
-OUTPUT_DIR = 'model_checkpoints_rinn/generate_x_results'
+# 输出结果目录（添加时间戳确保唯一性）
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_DIR = f'model_checkpoints_rinn/generate_x_results_{timestamp}'
 
 # 标准X样本（用于误差分析）
 STANDARD_X = np.array([3.757, 4.552, 4.125, 3.114, 2.893])

@@ -3,6 +3,90 @@ import torch.nn as nn
 import numpy as np
 
 
+class ResBlock(nn.Module):
+    """
+    残差块：解决深层网络梯度消失，提升特征提取能力
+    结构：输入层 → 权重归一化全连接层 → ReLU → 权重归一化全连接层 → 残差连接 → ReLU
+    """
+    def __init__(self, hidden_dim):
+        super(ResBlock, self).__init__()
+        
+        # 第一层：权重归一化全连接层 + ReLU
+        self.fc1 = nn.utils.weight_norm(nn.Linear(hidden_dim, hidden_dim))
+        
+        # 第二层：权重归一化全连接层
+        self.fc2 = nn.utils.weight_norm(nn.Linear(hidden_dim, hidden_dim))
+        
+        # 激活函数
+        self.relu = nn.ReLU()
+    
+    def forward(self, x):
+        # 保存输入用于残差连接
+        identity = x
+        
+        # 第一层
+        out = self.fc1(x)
+        out = self.relu(out)
+        
+        # 第二层
+        out = self.fc2(out)
+        
+        # 残差连接
+        out += identity
+        
+        # 输出激活
+        out = self.relu(out)
+        
+        return out
+
+
+class GaussianPrior(nn.Module):
+    """
+    高斯先验类：支持固定高斯和可学习高斯
+    """
+    def __init__(self, dim, learnable=False):
+        """
+        初始化高斯先验
+        参数:
+            dim: 高斯分布的维度
+            learnable: 是否使用可学习的均值和方差
+        """
+        super(GaussianPrior, self).__init__()
+        self.dim = dim
+        self.learnable = learnable
+        
+        if learnable:
+            # 可学习的均值和对数方差
+            self.mean = nn.Parameter(torch.zeros(dim))
+            self.log_var = nn.Parameter(torch.zeros(dim))
+        else:
+            # 固定的单位高斯分布
+            self.mean = torch.zeros(dim)
+            self.log_var = torch.zeros(dim)
+    
+    def log_prob(self, z):
+        """
+        计算z的高斯对数似然
+        输入:
+            z: 输入张量，形状(batch_size, dim)
+        输出:
+            log_prob: 对数似然，形状(batch_size,)
+        """
+        if self.learnable:
+            mean = self.mean
+            log_var = self.log_var
+        else:
+            # 将固定的均值和对数方差参数移动到与输入z相同的设备上
+            mean = self.mean.to(z.device)
+            log_var = self.log_var.to(z.device)
+        
+        # 计算高斯对数似然
+        # log p(z) = -0.5 * (log(2π) + log_var + (z - mean)^2 / exp(log_var))
+        log_prob = -0.5 * (torch.log(torch.tensor(2 * np.pi)) + log_var + 
+                         torch.pow(z - mean, 2) / torch.exp(log_var))
+        return log_prob.sum(dim=1)
+
+
 class AffineCoupling(nn.Module):
     """
     AffineCoupling层：将输入特征分为两部分，用一部分预测另一部分的仿射变换参数
@@ -27,27 +111,33 @@ class AffineCoupling(nn.Module):
             raise ValueError(f"AffineCoupling拆分后维度必须都大于0，但得到x1_dim={self.x1_dim}, x2_dim={self.x2_dim}")
         
         # 用于生成缩放参数scale的MLP
+        # 结构：nn.Linear (x1_dim, hidden_dim) → ReLU → ResBlock → nn.Linear (hidden_dim, x2_dim) → nn.Tanh () → 权重归一化的 Linear（无偏置，输出维度 x2_dim）
         self.scale_net = nn.Sequential(
             nn.Linear(self.x1_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            ResBlock(hidden_dim),
             nn.Linear(hidden_dim, self.x2_dim),
-            nn.Tanh()  # 使用tanh限制scale范围
+            nn.Tanh(),  # 使用tanh限制scale范围
+            nn.utils.weight_norm(nn.Linear(self.x2_dim, self.x2_dim, bias=False))
         )
         
+        # 初始化：最后一层 Linear 的权重初始化为 0.1
+        last_linear = self.scale_net[-1]
+        if hasattr(last_linear, 'weight_g'):
+            last_linear.weight_g.data.fill_(0.1)
+        else:
+            last_linear.weight.data.fill_(0.1)
+        
         # 用于生成平移参数translate的MLP
+        # 结构：与scale_net对称，仅移除最后两层（Tanh和权重归一化Linear），输出层无激活函数
         self.translate_net = nn.Sequential(
             nn.Linear(self.x1_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),#尝试使用两层神经网络
+            ResBlock(hidden_dim),
             nn.Linear(hidden_dim, self.x2_dim)
         )
+        
+        # 耦合层输出端不需要标准化，保持变换可逆性
     
     def forward(self, x):
         """
@@ -302,7 +392,8 @@ class RealNVP(nn.Module):
     RealNVP主类：实现完整的归一化流模型，符合RINN论文中"层级拆分+内部循环"的设计
     """
     def __init__(self, input_dim, hidden_dim=64, num_stages=4, num_cycles_per_stage=2, 
-                 ratio_toZ_after_flowstage=0.5, ratio_x1_x2_inAffine=0.5):
+                 ratio_toZ_after_flowstage=0.5, ratio_x1_x2_inAffine=0.5, 
+                 gaussian_learnable=False):
         """
         初始化RealNVP模型
         参数:
@@ -312,6 +403,7 @@ class RealNVP(nn.Module):
             num_cycles_per_stage: 每个流阶段中的内部循环次数
             ratio_toZ_after_flowstage: FlowStage拆分后进入z输出的比例 (0,1)
             ratio_x1_x2_inAffine: AffineCoupling层中条件部分x1的比例 (0,1)
+            gaussian_learnable: 是否使用可学习的高斯先验
         """
         super(RealNVP, self).__init__()
         
@@ -326,12 +418,16 @@ class RealNVP(nn.Module):
         self.num_stages = num_stages
         self.ratio_toZ_after_flowstage = ratio_toZ_after_flowstage
         self.ratio_x1_x2_inAffine = ratio_x1_x2_inAffine
+        self.gaussian_learnable = gaussian_learnable
         
         # 创建流动阶段列表
         self.stages = nn.ModuleList()
         
         # 创建用于残差链接融合的MLP层列表
         self.fusion_mlps = nn.ModuleList()
+        
+        # 创建高斯先验列表（每个阶段的z_part和最终的current_h都有一个高斯先验）
+        self.gaussian_priors = nn.ModuleList()
         
         # 预计算并存储每个阶段的维度信息，用于前向和逆向变换
         self.stage_input_dims = []     # 每个FlowStage的输入维度
@@ -385,7 +481,7 @@ class RealNVP(nn.Module):
                 num_cycles_per_stage
             ))
             
-            # 创建仿射变换融合的MLP：将z_part映射到2倍h_prime的维度，分别作为scale和shift
+            # 创建仿射变换融合的MLP：将z_part映射到2倍h_prime的维度，分别作为scale和shift？？？？？？？？？？？？为啥是二倍
             fusion_mlp = nn.Sequential(
                 nn.Linear(z_part_dim, hidden_dim),
                 nn.ReLU(),
@@ -396,8 +492,14 @@ class RealNVP(nn.Module):
             )
             self.fusion_mlps.append(fusion_mlp)
             
+            # 创建当前阶段z_part的高斯先验
+            self.gaussian_priors.append(GaussianPrior(z_part_dim, learnable=gaussian_learnable))
+            
             # 更新当前维度（为下一个阶段准备）
             current_dim = h_prime_dim
+        
+        # 为最终的current_h创建高斯先验
+        self.final_gaussian_prior = GaussianPrior(current_dim, learnable=gaussian_learnable)
     
     def forward(self, x):
         """
@@ -407,6 +509,7 @@ class RealNVP(nn.Module):
         输出:
             z: 变换后的数据，形状(batch_size, latent_dim)
             log_det_total: 雅可比行列式的对数总和，形状(batch_size,)
+            total_log_pz: 各阶段z_part和最终current_h的高斯对数似然之和，形状(batch_size,)
         """
         # 获取批次大小
         batch_size = x.shape[0]
@@ -424,9 +527,10 @@ class RealNVP(nn.Module):
         else:
             h = x
         
-        # 初始化z_list和log_det_total
+        # 初始化z_list、log_det_total和total_log_pz
         z_list = []
         log_det_total = 0
+        total_log_pz = 0
         
         # 当前处理的特征
         current_h = h
@@ -446,6 +550,10 @@ class RealNVP(nn.Module):
             # 执行当前阶段的前向变换（先循环再拆分）
             z_part, h_prime, log_det = stage(current_h)
             log_det_total += log_det
+            
+            # 计算当前z_part的高斯对数似然，对于一组数来说（本来输入了5个特征，这时候可能只有3个特征在z里了这样子，），是一个值
+            log_pz = self.gaussian_priors[i].log_prob(z_part)
+            total_log_pz += log_pz
             
             # 添加当前阶段的输出z
             z_list.append(z_part)
@@ -470,10 +578,14 @@ class RealNVP(nn.Module):
         # 添加最后剩余的特征作为最终的z
         z_list.append(current_h)
         
+        # 计算最终current_h的高斯对数似然
+        log_pz_final = self.final_gaussian_prior.log_prob(current_h)
+        total_log_pz += log_pz_final
+        
         # 合并所有z为一个向量
         z = torch.cat(z_list, dim=-1)
         
-        return z, log_det_total
+        return z, log_det_total, total_log_pz
     
     def inverse(self, z):
         """
@@ -514,6 +626,7 @@ class RealNVP(nn.Module):
         else:
             # 特殊情况处理
             current_h = torch.zeros(batch_size, 2, device=device, dtype=z.dtype)
+            print("\n警告:输入z维度不足,已填充零到2个特征!!!!!!!!!!!!!!!!!!!!\n")
         
         # 逆序遍历每个流阶段，重建原始特征
         for i in reversed(range(min(len(self.stages), len(z_list)))):
@@ -557,6 +670,17 @@ class RealNVP(nn.Module):
         return x_recon, log_det_total
 
 
+def calculate_loss(log_px):
+    """
+    计算损失函数
+    输入:
+        log_px: 输入数据的对数似然，形状(batch_size,)
+    输出:
+        loss: 负对数似然的均值，标量
+    """
+    return -torch.mean(log_px)
+
+
 # 可逆性验证示例
 if __name__ == "__main__":
     # 设置随机种子以保证结果可复现
@@ -565,28 +689,38 @@ if __name__ == "__main__":
     # 配置参数 - 测试非偶数维度
     input_dim = 13  # 目标输入维度（非偶数）
     batch_size = 32  # 批次大小
-    data_dim = 10  # 实际数据维度（小于input_dim，测试零填充功能）
+    data_dim = 13  # 实际数据维度（等于input_dim）
     
-    # 创建模型 - 使用非0.5拆分比例
+    # 创建模型 - 使用非0.5拆分比例，可学习高斯先验
     model = RealNVP(
         input_dim=input_dim,
         hidden_dim=64,
         num_stages=4,
         num_cycles_per_stage=2,
         ratio_toZ_after_flowstage=0.3,  # 30%进入z输出
-        ratio_x1_x2_inAffine=0.25       # 25%为x1条件部分
+        ratio_x1_x2_inAffine=0.25,       # 25%为x1条件部分
+        gaussian_learnable=True          # 使用可学习高斯先验
     )
     
-    # 生成随机输入（实际数据维度小于目标输入维度）
+    # 生成随机输入（实际数据维度等于目标输入维度）
     x = torch.randn(batch_size, data_dim)
     
     try:
         print(f"原始输入x的形状: {x.shape}")
         
         # 前向传播
-        z, log_det_forward = model(x)
+        z, log_det_forward, total_log_pz = model(x)
         print(f"前向传播成功，z的形状: {z.shape}")
         print(f"前向log_det: {log_det_forward.mean().item():.4f}")
+        print(f"总log_pz: {total_log_pz.mean().item():.4f}")
+        
+        # 计算log_px
+        log_px = total_log_pz + log_det_forward
+        print(f"log_px: {log_px.mean().item():.4f}")
+        
+        # 计算损失
+        loss = calculate_loss(log_px)
+        print(f"损失: {loss.item():.4f}")
         
         # 逆向传播
         x_recon, log_det_inverse = model.inverse(z)

@@ -35,8 +35,8 @@ class ActNorm(torch.jit.ScriptModule):
         if not self._initialized:
             # 计算均值和标准差，避免batch size为1时的问题
             flat_x = x.detach().reshape(-1, x.shape[-1])
-            mean_x = flat_x.mean(0)
-            std_x = flat_x.std(0, unbiased=False)
+            mean_x = flat_x.mean(0) #计算每个通道的均值（在所有空间位置和样本上）
+            std_x = flat_x.std(0, unbiased=False) #计算每个通道的标准差（使用有偏估计）
             
             # 避免标准差为0的情况
             std_x = torch.clamp(std_x, min=1e-6)

@@ -3,7 +3,7 @@
   "model_dir": "model_checkpoints_rinn/rinn_correct_structure_20260208_104358",
   "num_samples": 3,
   "random_seed": 42,
-  "generation_time": "2026-02-08 19:43:52",
+  "generation_time": "2026-02-08 22:13:11",
   "generated_x_samples": [
     [
       3.6986897755227828,

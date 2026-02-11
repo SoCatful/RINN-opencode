@@ -1,8 +1,8 @@
 """
 基于RINN模型的密度估计实现
 正确的数据结构和损失计算：
-1. 左侧输入：X(5维) + 零填充(100维) → 总105维
-2. 右侧输入：Y(100维) + Z(5维) → 总105维，其中Z是随机生成的标准高斯分布
+1. 左侧输入：X(5维) + 零填充(202维) → 总207维
+2. 右侧输入：Y(202维) + Z(5维) → 总207维，其中Z是随机生成的标准高斯分布
 3. 损失计算：
    - 正向预测的Y'和真实Y的NMSE损失
    - 重建X的损失
@@ -18,10 +18,62 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import csv
 import re
+import argparse
+import json
 
 # 设置随机种子
 torch.manual_seed(42)
 np.random.seed(42)
+
+# ============== 参数解析 ==============
+def parse_args():
+    parser = argparse.ArgumentParser(description='RINN模型训练脚本')
+    parser.add_argument('--config', type=str, default=None, help='配置文件路径')
+    return parser.parse_args()
+
+args = parse_args()
+
+# 加载配置
+config = {
+    "model_config": {
+        "hidden_dim": 56,
+        "num_blocks": 4,
+        "num_stages": 2,
+        "num_cycles_per_stage": 2,
+        "ratio_toZ_after_flowstage": 0.273,
+        "ratio_x1_x2_inAffine": 0.421
+    },
+    "training_params": {
+        "batch_size": 16,
+        "gradient_accumulation_steps": 1,
+        "learning_rate": 0.000659,
+        "weight_decay": 1.5e-06,
+        "clip_value": 0.5,
+        "num_epochs": 150,
+        "loss_weights": {
+            "weight_y": 0.626,
+            "weight_x": 0.233,
+            "weight_z": 0.254
+        }
+    },
+    "data_params": {
+        "normalization_method": "robust"
+    }
+}
+
+# 如果提供了配置文件，加载配置
+if args.config and os.path.exists(args.config):
+    print(f'从配置文件加载参数: {args.config}')
+    with open(args.config, 'r', encoding='utf-8') as f:
+        loaded_config = json.load(f)
+    # 更新配置
+    if 'model_config' in loaded_config:
+        config['model_config'].update(loaded_config['model_config'])
+    if 'training_params' in loaded_config:
+        config['training_params'].update(loaded_config['training_params'])
+    if 'data_params' in loaded_config:
+        config['data_params'].update(loaded_config['data_params'])
+    print('配置加载完成!')
 
 # ============== 创建训练输出文件夹 ==============
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -29,6 +81,10 @@ experiment_name = f"rinn_correct_structure_{timestamp}"
 checkpoint_dir = os.path.join('model_checkpoints_rinn', experiment_name)
 os.makedirs(checkpoint_dir, exist_ok=True)
 print(f'本次训练输出文件夹: {checkpoint_dir}')
+
+# 保存使用的配置
+with open(os.path.join(checkpoint_dir, 'used_config.json'), 'w', encoding='utf-8') as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
 
 # 设置环境变量
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
@@ -39,14 +95,6 @@ device = get_device()
 
 # ============== 数据加载与预处理 ==============
 print('\n=== 加载数据 ===')
-
-# 加载s11.csv文件
-data_path = 'data/s11.csv'
-
-# 读取表头获取几何参数
-with open(data_path, 'r', encoding='utf-8-sig') as f:
-    reader = csv.reader(f)
-    header = next(reader)
 
 # 提取几何参数信息
 def extract_geometry_params(col_name):
@@ -59,30 +107,80 @@ def extract_geometry_params(col_name):
     hc1_match = re.search(r"H_C1='([\d.]+)mm'", col_name)
     hc2_match = re.search(r"H_C2='([\d.]+)mm'", col_name)
     
+    # 检查是否是实部还是虚部
+    is_real = 're(S(1,1))' in col_name
+    is_imag = 'im(S(1,1))' in col_name
+    
     if all([h1_match, h2_match, h3_match, hc1_match, hc2_match]):
-        return [
-            float(h1_match.group(1)),
-            float(h2_match.group(1)),
-            float(h3_match.group(1)),
-            float(hc1_match.group(1)),
-            float(hc2_match.group(1))
-        ]
+        return {
+            'params': [
+                float(h1_match.group(1)),
+                float(h2_match.group(1)),
+                float(h3_match.group(1)),
+                float(hc1_match.group(1)),
+                float(hc2_match.group(1))
+            ],
+            'type': 'real' if is_real else 'imaginary'
+        }
     return None
 
-# 提取所有几何参数样本
-x_samples = []
-valid_columns = []
-
-<<<<<<< Updated upstream
-for i, col in enumerate(header[1:]):  # 跳过第一列频率
-    params = extract_geometry_params(col)
-    if params:
-        x_samples.append(params)
-        valid_columns.append(i+1)
-
-x_features = np.array(x_samples, dtype=np.float32)
-print(f'X特征形状: {x_features.shape}')
-print(f'X特征示例 (第一个样本): {x_features[0]}')
+def load_data_from_csv(data_path):
+    """从CSV文件加载数据"""
+    print(f'正在加载数据文件: {data_path}')
+    
+    # 读取表头获取几何参数
+    with open(data_path, 'r', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        header = next(reader)
+    
+    # 提取所有几何参数样本和数据列
+    geometry_dict = {}
+    
+    for i, col in enumerate(header[1:]):  # 跳过第一列频率
+        params = extract_geometry_params(col)
+        if params:
+            geo_key = tuple(params['params'])
+            if geo_key not in geometry_dict:
+                geometry_dict[geo_key] = {'real': None, 'imag': None}
+            if params['type'] == 'real':
+                geometry_dict[geo_key]['real'] = i+1
+            else:
+                geometry_dict[geo_key]['imag'] = i+1
+    
+    # 只保留同时有实部和虚部的样本
+    valid_samples = []
+    real_columns = []
+    imag_columns = []
+    
+    for geo_key, cols in geometry_dict.items():
+        if cols['real'] is not None and cols['imag'] is not None:
+            valid_samples.append(list(geo_key))
+            real_columns.append(cols['real'])
+            imag_columns.append(cols['imag'])
+    
+    x_features = np.array(valid_samples, dtype=np.float32)
+    print(f'  X特征形状: {x_features.shape}')
+    print(f'  X特征示例 (第一个样本): {x_features[0]}')
+    
+    # 读取S11数据
+    data = np.genfromtxt(data_path, delimiter=',', skip_header=1)
+    freq_data = data[:, 0]  # 频率数据
+    print(f'  频率点数: {len(freq_data)}')
+    print(f'  频率范围: {freq_data[0]} GHz - {freq_data[-1]} GHz')
+    
+    # 提取实部和虚部数据列
+    real_data = data[:, real_columns]  # 实部数据
+    imag_data = data[:, imag_columns]  # 虚部数据
+    
+    # 转置为(样本数, 频率点数)
+    real_data = real_data.T
+    imag_data = imag_data.T
+    
+    # 合并实部和虚部为一个202维的输出（101维实部 + 101维虚部）
+    y_data = np.concatenate((real_data, imag_data), axis=1)
+    print(f'  Y数据形状: {y_data.shape} (101维实部 + 101维虚部)')
+    
+    return x_features, y_data, freq_data
 
 # 加载训练数据
 train_data_path = 'data/S Parameter Plot300.csv'
@@ -92,35 +190,12 @@ train_x, train_y, freq_data = load_data_from_csv(train_data_path)
 val_data_path = 'data/S Parameter Plot200.csv'
 val_x, val_y, _ = load_data_from_csv(val_data_path)
 
-# 读取S11数据
-data = np.genfromtxt(data_path, delimiter=',', skip_header=1)
-freq_data = data[:, 0]  # 频率数据
-print(f'频率点数: {len(freq_data)}')
-print(f'频率范围: {freq_data[0]} GHz - {freq_data[-1]} GHz')
-
-# 提取有效的S11数据列
-y_data = data[:, valid_columns]  # 只保留有效的列
-y_data = y_data.T  # 转置为(样本数, 频率点数)
-print(f'Y数据形状: {y_data.shape}')
+print(f'\n训练集样本数: {len(train_x)}')
+print(f'验证集样本数: {len(val_x)}')
 
 # 数据标准化
-normalization_method = 'robust'  # 'standard' 或 'robust'
-
-# 先划分训练集和验证集的索引，再分别进行归一化
-n_samples = len(x_features)
-indices = np.random.permutation(n_samples)
-train_size = int(0.8 * n_samples)
-
-train_indices = indices[:train_size]
-val_indices = indices[train_size:]
-
-# 提取训练集数据
-train_x = x_features[train_indices]
-train_y = y_data[train_indices]
-
-# 提取验证集数据
-val_x = x_features[val_indices]
-val_y = y_data[val_indices]
+normalization_method = config['data_params']['normalization_method']  # 'standard' 或 'robust'
+print(f'\n数据归一化方法: {normalization_method}')
 
 # 训练集归一化
 if normalization_method == 'standard':
@@ -132,6 +207,11 @@ if normalization_method == 'standard':
     
     y_mean = train_y.mean(axis=0)
     y_std = train_y.std(axis=0)
+    
+    # 确保y_mean和y_std是202维（101维实部 + 101维虚部）
+    y_mean = y_mean[:202]
+    y_std = y_std[:202]
+    
     train_y_normalized = (train_y - y_mean) / (y_std + 1e-8)
     val_y_normalized = (val_y - y_mean) / (y_std + 1e-8)
 else:  # 'robust'
@@ -171,44 +251,47 @@ else:  # 'robust'
     # 保存鲁棒归一化参数
     x_mean, x_std = x_median, x_iqr
     y_mean, y_std = y_median_clipped, y_iqr_clipped
-
-# 合并归一化后的训练集和验证集
-x_features_normalized = np.zeros_like(x_features, dtype=np.float32)
-x_features_normalized[train_indices] = train_x_normalized
-x_features_normalized[val_indices] = val_x_normalized
-
-y_features_normalized = np.zeros_like(y_data, dtype=np.float32)
-y_features_normalized[train_indices] = train_y_normalized
-y_features_normalized[val_indices] = val_y_normalized
+    
+    # 确保y_mean和y_std是202维（101维实部 + 101维虚部）
+    y_mean = y_mean[:202]
+    y_std = y_std[:202]
 
 # 数据质量检查
-print(f'归一化方法: {normalization_method}')
-print(f'X特征归一化后均值: {x_features_normalized.mean(axis=0).mean():.6f}, 标准差: {x_features_normalized.std(axis=0).mean():.6f}')
-print(f'Y数据归一化后均值: {y_features_normalized.mean(axis=0).mean():.6f}, 标准差: {y_features_normalized.std(axis=0).mean():.6f}')
+print(f'\n归一化方法: {normalization_method}')
+print(f'X训练集归一化后均值: {train_x_normalized.mean(axis=0).mean():.6f}, 标准差: {train_x_normalized.std(axis=0).mean():.6f}')
+print(f'X验证集归一化后均值: {val_x_normalized.mean(axis=0).mean():.6f}, 标准差: {val_x_normalized.std(axis=0).mean():.6f}')
+print(f'Y训练集归一化后均值: {train_y_normalized.mean(axis=0).mean():.6f}, 标准差: {train_y_normalized.std(axis=0).mean():.6f}')
+print(f'Y验证集归一化后均值: {val_y_normalized.mean(axis=0).mean():.6f}, 标准差: {val_y_normalized.std(axis=0).mean():.6f}')
 
 # 检查是否存在NaN或无穷大值
-print(f'X特征是否包含NaN: {np.isnan(x_features_normalized).any()}')
-print(f'X特征是否包含无穷大: {np.isinf(x_features_normalized).any()}')
-print(f'Y数据是否包含NaN: {np.isnan(y_features_normalized).any()}')
-print(f'Y数据是否包含无穷大: {np.isinf(y_features_normalized).any()}')
+print(f'X训练集是否包含NaN: {np.isnan(train_x_normalized).any()}')
+print(f'X训练集是否包含无穷大: {np.isinf(train_x_normalized).any()}')
+print(f'X验证集是否包含NaN: {np.isnan(val_x_normalized).any()}')
+print(f'X验证集是否包含无穷大: {np.isinf(val_x_normalized).any()}')
+print(f'Y训练集是否包含NaN: {np.isnan(train_y_normalized).any()}')
+print(f'Y训练集是否包含无穷大: {np.isinf(train_y_normalized).any()}')
+print(f'Y验证集是否包含NaN: {np.isnan(val_y_normalized).any()}')
+print(f'Y验证集是否包含无穷大: {np.isinf(val_y_normalized).any()}')
 
 # 检查归一化后的数据范围
-print(f'X特征归一化后最小值: {x_features_normalized.min():.6f}, 最大值: {x_features_normalized.max():.6f}')
-print(f'Y数据归一化后最小值: {y_features_normalized.min():.6f}, 最大值: {y_features_normalized.max():.6f}')
+print(f'X训练集归一化后最小值: {train_x_normalized.min():.6f}, 最大值: {train_x_normalized.max():.6f}')
+print(f'X验证集归一化后最小值: {val_x_normalized.min():.6f}, 最大值: {val_x_normalized.max():.6f}')
+print(f'Y训练集归一化后最小值: {train_y_normalized.min():.6f}, 最大值: {train_y_normalized.max():.6f}')
+print(f'Y验证集归一化后最小值: {val_y_normalized.min():.6f}, 最大值: {val_y_normalized.max():.6f}')
 
 # ============== 维度处理：正确的数据结构 ==============
 print('\n=== 维度处理与数据结构 ===')
 
 # 配置参数
-x_dim = x_features.shape[1]  # X维度：5
-y_dim = y_data.shape[1]       # Y维度：100
-z_dim = x_dim                 # Z维度：5（与X维度相同）
+x_dim = train_x.shape[1]  # X维度：5
+y_dim = train_y.shape[1]  # Y维度：202（101维实部 + 101维虚部）
+z_dim = x_dim             # Z维度：5（与X维度相同）
 
-# 左侧输入：X + 零填充 → 总维度 = x_dim + padding_dim = x_dim + y_dim = 105
+# 左侧输入：X + 零填充 → 总维度 = x_dim + padding_dim = 5 + 202 = 207
 padding_dim = y_dim
 left_input_dim = x_dim + padding_dim
 
-# 右侧输入：Y + Z → 总维度 = y_dim + z_dim = 105
+# 右侧输入：Y + Z → 总维度 = y_dim + z_dim = 202 + 5 = 207
 right_input_dim = y_dim + z_dim
 
 print(f'X维度: {x_dim}, Y维度: {y_dim}, Z维度: {z_dim}')
@@ -217,19 +300,22 @@ print(f'右侧输入维度: {right_input_dim} (Y: {y_dim} + Z: {z_dim})')
 print(f'总输入/输出维度: {left_input_dim} (左右侧维度相同)')
 
 # 配置affine coupling比率，根据X和Y的维度调整
-ratio_x1_x2_inAffine = x_dim / left_input_dim  # X部分作为条件输入的比例
-ratio_toZ_after_flowstage = 0.3  # 保持默认值
+if config['model_config']['ratio_x1_x2_inAffine'] is None:
+    ratio_x1_x2_inAffine = x_dim / left_input_dim  # X部分作为条件输入的比例
+else:
+    ratio_x1_x2_inAffine = config['model_config']['ratio_x1_x2_inAffine']
+ratio_toZ_after_flowstage = config['model_config']['ratio_toZ_after_flowstage']
 
 print(f'Affine coupling比率: {ratio_x1_x2_inAffine}')
 
 # 创建训练集数据
 # 左侧输入：X + 零填充
-left_train_input = np.concatenate((train_x_normalized, np.zeros((train_size, padding_dim), dtype=np.float32)), axis=1)
-left_val_input = np.concatenate((val_x_normalized, np.zeros((n_samples - train_size, padding_dim), dtype=np.float32)), axis=1)
+left_train_input = np.concatenate((train_x_normalized, np.zeros((len(train_x_normalized), padding_dim), dtype=np.float32)), axis=1)
+left_val_input = np.concatenate((val_x_normalized, np.zeros((len(val_x_normalized), padding_dim), dtype=np.float32)), axis=1)
 
 # 右侧输入：Y + Z（Z是随机生成的标准高斯分布）
-train_z = np.random.randn(train_size, z_dim).astype(np.float32)
-val_z = np.random.randn(n_samples - train_size, z_dim).astype(np.float32)
+train_z = np.random.randn(len(train_y_normalized), z_dim).astype(np.float32)
+val_z = np.random.randn(len(val_y_normalized), z_dim).astype(np.float32)
 
 right_train_input = np.concatenate((train_y_normalized, train_z), axis=1)
 right_val_input = np.concatenate((val_y_normalized, val_z), axis=1)
@@ -245,12 +331,12 @@ print(f'  训练集: {len(left_train)} 样本')
 print(f'  验证集: {len(left_val)} 样本')
 
 # 创建DataLoader
-batch_size = 32  # 增加batch_size，提高训练稳定性
+batch_size = config['training_params']['batch_size']  # 从配置中获取batch_size，提高训练稳定性
 train_dataset = TensorDataset(left_train, right_train)
 val_dataset = TensorDataset(left_val, right_val)
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)  # 增加batch_size，提高验证效率
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)  # 从配置中获取batch_size，提高验证效率
 
 # ============== 模型定义 ==============
 print('\n=== 模型定义 ===')
@@ -262,10 +348,10 @@ from R_INN_model.loss_methods import mmd_loss, nmse_loss, weighted_nmse_loss
 # 创建可逆模型（密度估计任务）
 model = RINNModel(
     input_dim=left_input_dim,  # 模型输入/输出维度：左右侧维度相同
-    hidden_dim=56,  # 进一步增加隐藏层维度，提高模型拟合能力
-    num_blocks=5,   # 进一步增加block数量，增强模型表达能力
-    num_stages=2,   # 保持stage数量不变，控制模型深度
-    num_cycles_per_stage=2,  # 保持每个stage的cycles数量不变
+    hidden_dim=config['model_config']['hidden_dim'],  # 从配置中获取hidden_dim，提高模型拟合能力
+    num_blocks=config['model_config']['num_blocks'],   # 从配置中获取num_blocks，增强模型表达能力
+    num_stages=config['model_config']['num_stages'],   # 从配置中获取num_stages，控制模型深度
+    num_cycles_per_stage=config['model_config']['num_cycles_per_stage'],  # 从配置中获取num_cycles_per_stage
     ratio_toZ_after_flowstage=ratio_toZ_after_flowstage,
     ratio_x1_x2_inAffine=ratio_x1_x2_inAffine  # 使用适合X的affine coupling比率
 ).to(device)
@@ -285,29 +371,28 @@ print('\n=== 训练配置 ===')
 skip_training = False  # 设置为True跳过训练，False执行完整训练
 
 # 损失权重
-weight_y = 1.5   # 增加Y预测损失权重，提高正向预测精度
-weight_x = 0.5   # X重建损失权重保持不变
-weight_z = 0.3   # Z分布约束权重保持不变，平衡生成多样性和稳定性
-clip_value = 0.5  # 减小梯度裁剪阈值，防止梯度爆炸
+weight_y = config['training_params']['loss_weights']['weight_y']  # 从配置中获取weight_y，提高正向预测精度
+weight_x = config['training_params']['loss_weights']['weight_x']  # 从配置中获取weight_x，保持X重建损失权重不变
+weight_z = config['training_params']['loss_weights']['weight_z']  # 从配置中获取weight_z，平衡生成多样性和稳定性
+clip_value = config['training_params']['clip_value']  # 从配置中获取clip_value，防止梯度爆炸
 
 # 优化器
-lr = 5e-4  # 降低初始学习率，使用更精细的学习率调整
-weight_decay = 1e-5  # 调整权重衰减，平衡正则化
+lr = config['training_params']['learning_rate']  # 从配置中获取学习率，使用更精细的学习率调整
+weight_decay = config['training_params']['weight_decay']  # 从配置中获取权重衰减，平衡正则化
 optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)  # 使用AdamW优化器
 
 # 使用学习率衰减策略
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, threshold=1e-6)  # 调整patience，平衡收敛速度和稳定性
 
 # 训练参数
-num_epochs = 200  # 增加训练轮数，让模型有更多时间拟合
-num_epochs = 150  # 增加训练轮数，让模型有更多时间拟合
+num_epochs = config['training_params']['num_epochs']  # 从配置中获取训练轮数，让模型有更多时间拟合
 best_val_loss = float('inf')
 best_epoch = 0  # 初始化最佳epoch为0
 patience = 60  # 增加早停耐心，避免过早停止
 patience_counter = 0
 
 # 梯度累积步数
-grad_accum_steps = 1  # 减少梯度累积，直接使用更大的batch_size
+grad_accum_steps = config['training_params']['gradient_accumulation_steps']  # 从配置中获取梯度累积步数
 
 # 训练历史
 train_losses = {'total': [], 'y_loss': [], 'x_loss': [], 'z_loss': []}
@@ -318,10 +403,10 @@ training_info = {
     'timestamp': timestamp,
     'model_config': {
         'input_dim': model.input_dim,
-        'hidden_dim': 56,
-        'num_blocks': 5,
-        'num_stages': 2,
-        'num_cycles_per_stage': 2,
+        'hidden_dim': config['model_config']['hidden_dim'],
+        'num_blocks': config['model_config']['num_blocks'],
+        'num_stages': config['model_config']['num_stages'],
+        'num_cycles_per_stage': config['model_config']['num_cycles_per_stage'],
         'ratio_toZ_after_flowstage': ratio_toZ_after_flowstage,
         'ratio_x1_x2_inAffine': ratio_x1_x2_inAffine
     },
@@ -388,9 +473,12 @@ def calculate_loss(left_input, right_input):
     reconstructed_x = reconstructed_left[:, :x_dim]
     
     # 使用NMSE损失，使量纲与其他损失项一致
-    x_mse = torch.mean((real_x - reconstructed_x) ** 2)
-    x_rms = torch.sqrt(torch.mean(real_x ** 2) + 1e-8)
-    x_loss = x_mse / (x_rms ** 2 + 1e-8)
+    # x_mse = torch.mean((real_x - reconstructed_x) ** 2)
+    # x_rms = torch.sqrt(torch.mean(real_x ** 2) + 1e-8)
+    # x_loss = x_mse / (x_rms ** 2 + 1e-8)
+    
+    # 使用MMD损失计算x损失
+    x_loss = mmd_loss(real_x, reconstructed_x)
     
     # 3. Z分布约束：predicted_z与标准高斯分布的MMD差异
     z_target = torch.randn_like(predicted_z).to(device)  # 标准高斯分布
@@ -576,7 +664,6 @@ if not skip_training:
     with open(best_val_loss_file, 'a') as f:
         f.write(f'Validation Set Average NMSE: {avg_val_nmse:.6f}\n')
     print(f'验证集平均NMSE已追加保存到: {best_val_loss_file}')
->>>>>>> Stashed changes
 else:
     print('跳过训练阶段 (skip_training=True)')
     # 生成虚拟损失数据以避免可视化错误
@@ -589,6 +676,7 @@ else:
     val_losses['x_loss'] = [0.6, 0.5, 0.4, 0.3, 0.2] * 20
     val_losses['z_loss'] = [0.4, 0.3, 0.3, 0.2, 0.2] * 20
     best_val_loss = 0.2
+    avg_val_nmse = 0.2  # 虚拟值
 
 # ============== 可视化训练曲线 ==============
 print('\n=== Generating training curves ===')
@@ -639,8 +727,10 @@ print('Training curves saved to:', os.path.join(checkpoint_dir, 'training_losses
 # ============== 模型功能实现：固定x预测y ==============
 print('\n=== Fixed x predicting y functionality ===')
 
-# 从验证集中选取五个测试样本
-test_indices = [0, 10, 20, 30, 40]  # 五个不同的测试样本索引
+# 从验证集中选取测试样本，确保索引不超过验证集长度
+val_size = len(val_x)
+test_indices = [i * val_size // 5 for i in range(5)]  # 均匀选取5个测试样本
+print(f'验证集大小: {val_size}, 测试样本索引: {test_indices}')
 
 for i, test_idx in enumerate(test_indices):
     print(f'\nPredicting y for test sample {i+1}:')
@@ -656,27 +746,54 @@ for i, test_idx in enumerate(test_indices):
     with torch.no_grad():
         predicted_right, _, _ = model(left_test_input, return_intermediate=True)
         
-        # 从predicted_right中提取Y'
-        predicted_y_normalized = predicted_right[:, :y_dim]
+        # 从predicted_right中提取Y'，并确保维度是202维
+        predicted_y_normalized = predicted_right[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
         
         # 反标准化得到预测的y
         predicted_y = predicted_y_normalized.cpu().numpy() * y_std + y_mean
 
     # 获取真实的y值
     real_y = val_y[test_idx:test_idx+1]
+    
+    # 确保real_y维度正确
+    real_y = real_y[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
+
+    # 计算NMSE
+    real_y_tensor = torch.FloatTensor(real_y).to(device)
+    predicted_y_tensor = torch.FloatTensor(predicted_y).to(device)
+    # 计算NMSE时需要归一化数据
+    real_y_normalized = (real_y - y_mean) / (y_std + 1e-8)
+    predicted_y_normalized = (predicted_y - y_mean) / (y_std + 1e-8)
+    real_y_normalized_tensor = torch.FloatTensor(real_y_normalized).to(device)
+    predicted_y_normalized_tensor = torch.FloatTensor(predicted_y_normalized).to(device)
+    nmse_value = nmse_loss(predicted_y_normalized_tensor, real_y_normalized_tensor).item()
 
     print(f'  Test sample {i+1} prediction result:')
     print(f'    Predicted y shape: {predicted_y.shape}')
+    print(f'    NMSE: {nmse_value:.6f}')
 
-    # 可视化预测结果 - 确保频率点和y数据点数量一致
-    plt.figure(figsize=(10, 6))
-    plt.plot(freq_data[:y_dim], real_y[0], label='Real y', color='blue', linewidth=2)
-    plt.plot(freq_data[:y_dim], predicted_y[0], label='Predicted y', color='red', linestyle='--', linewidth=2)
+    # 可视化预测结果 - 分别显示实部和虚部
+    # 实部（前101维）
+    plt.figure(figsize=(12, 8))
+    plt.subplot(2, 1, 1)
+    plt.plot(freq_data[:101], real_y[0, :101], label='Real Re(S11)', color='blue', linewidth=2)
+    plt.plot(freq_data[:101], predicted_y[0, :101], label='Predicted Re(S11)', color='red', linestyle='--', linewidth=2)
     plt.xlabel('Frequency (GHz)')
-    plt.ylabel('S11 (dB)')
-    plt.title(f'Comparison of y prediction with fixed x - Sample {i+1}')
+    plt.ylabel('Re(S11)')
+    plt.title(f'Comparison of Re(S11) prediction with fixed x - Sample {i+1}')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    
+    # 虚部（后101维）
+    plt.subplot(2, 1, 2)
+    plt.plot(freq_data[:101], real_y[0, 101:], label='Real Im(S11)', color='green', linewidth=2)
+    plt.plot(freq_data[:101], predicted_y[0, 101:], label='Predicted Im(S11)', color='orange', linestyle='--', linewidth=2)
+    plt.xlabel('Frequency (GHz)')
+    plt.ylabel('Im(S11)')
+    plt.title(f'Comparison of Im(S11) prediction with fixed x - Sample {i+1}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.savefig(os.path.join(checkpoint_dir, f'fixed_x_predicted_y_{i+1}.png'), dpi=150, bbox_inches='tight')
     plt.close()
@@ -803,14 +920,21 @@ for i, y_test_idx in enumerate(y_test_indices[:5]):
         
         # 正向预测
         predicted_right, _, _ = model(left_test_input, return_intermediate=True)
-        predicted_y_normalized = predicted_right[:, :y_dim]
+        
+        # 从predicted_right中提取Y'，并确保维度是202维
+        predicted_y_normalized = predicted_right[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
+        
+        # 反标准化得到预测的y
         predicted_y = predicted_y_normalized.cpu().numpy() * y_std + y_mean
 
     # 获取真实的y值
     real_y = val_y[y_test_idx:y_test_idx+1]
+    
+    # 确保real_y维度正确
+    real_y = real_y[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
 
     # 可视化：将x分布和y预测拼到一起
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [1, 2]})
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), gridspec_kw={'height_ratios': [1, 1, 1]})
     
     # 第一个子图：x参数对比
     grid = np.arange(x_dim)
@@ -825,14 +949,23 @@ for i, y_test_idx in enumerate(y_test_indices[:5]):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # 第二个子图：y预测对比
-    ax2.plot(freq_data[:y_dim], real_y[0], label='Real y', color='blue', linewidth=2)
-    ax2.plot(freq_data[:y_dim], predicted_y[0], label='Predicted y (from backward x)', color='red', linestyle='--', linewidth=2)
+    # 第二个子图：实部对比
+    ax2.plot(freq_data[:101], real_y[0, :101], label='Real Re(S11)', color='blue', linewidth=2)
+    ax2.plot(freq_data[:101], predicted_y[0, :101], label='Predicted Re(S11)', color='red', linestyle='--', linewidth=2)
     ax2.set_xlabel('Frequency (GHz)')
-    ax2.set_ylabel('S11 (dB)')
-    ax2.set_title(f'Y Prediction Consistency - Sample {i+1}')
+    ax2.set_ylabel('Re(S11)')
+    ax2.set_title(f'Real Part Prediction Consistency - Sample {i+1}')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+    
+    # 第三个子图：虚部对比
+    ax3.plot(freq_data[:101], real_y[0, 101:], label='Real Im(S11)', color='green', linewidth=2)
+    ax3.plot(freq_data[:101], predicted_y[0, 101:], label='Predicted Im(S11)', color='orange', linestyle='--', linewidth=2)
+    ax3.set_xlabel('Frequency (GHz)')
+    ax3.set_ylabel('Im(S11)')
+    ax3.set_title(f'Imaginary Part Prediction Consistency - Sample {i+1}')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(os.path.join(checkpoint_dir, f'fixed_y_backward_x_{i+1}.png'), dpi=150, bbox_inches='tight')
@@ -848,7 +981,7 @@ y_test = val_y_normalized[multi_solution_idx:multi_solution_idx+1]  # 形状：(
 real_x = val_x[multi_solution_idx:multi_solution_idx+1]  # 真实的x值
 
 # 对于同一个y，生成多个z样本
-num_samples = 100  # 100 prediction samples
+num_samples = 50  # 50 prediction samples
 z_scale = 1.2  # Adjust Z sampling range to increase diversity and improve result fit
 z_samples = np.random.randn(num_samples, z_dim).astype(np.float32) * z_scale
 
@@ -868,8 +1001,9 @@ with torch.no_grad():
     reconstructed_xs = reconstructed_xs_normalized.cpu().numpy() * x_std + x_mean
 
 # 对生成的X进行后处理，确保在合理物理范围内
-x_min = x_features.min(axis=0)
-x_max = x_features.max(axis=0)
+all_x = np.concatenate((train_x, val_x), axis=0)
+x_min = all_x.min(axis=0)
+x_max = all_x.max(axis=0)
 reconstructed_xs_clipped = np.clip(reconstructed_xs, x_min, x_max)
 
 # 验证X的多样性
@@ -893,23 +1027,27 @@ left_predict_inputs = torch.FloatTensor(left_predict_inputs).to(device)
 with torch.no_grad():
     predicted_rights, _ = model(left_predict_inputs)
     
-    # 从predicted_rights中提取Y'
-    predicted_ys_normalized = predicted_rights[:, :y_dim]
+    # 从predicted_rights中提取Y'，并确保维度是202维
+    predicted_y_normalized = predicted_rights[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
     
     # 反标准化得到预测的y
-    predicted_ys = predicted_ys_normalized.cpu().numpy() * y_std + y_mean
+    predicted_y = predicted_y_normalized.cpu().numpy() * y_std + y_mean
 
 # 计算每个预测的Y与原始Y的误差
 y_test_original = val_y[multi_solution_idx:multi_solution_idx+1]  # Original unnormalized Y
+
+# 确保y_test_original维度正确
+y_test_original = y_test_original[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
+
 errors = []
 for i in range(num_samples):
-    error = np.mean(np.abs(predicted_ys[i] - y_test_original[0]))
+    error = np.mean(np.abs(predicted_y[i] - y_test_original[0]))
     errors.append(error)
-    # 只打印前10个解的误差，避免输出过多
-    if i < 10:
+    # 只打印前5个解的误差，避免输出过多
+    if i < 5:
         print(f'  Solution {i+1} Y prediction error: {error:.6f}')
-if num_samples > 10:
-    print(f'  ... and {num_samples - 10} more solutions')
+if num_samples > 5:
+    print(f'  ... and {num_samples - 5} more solutions')
 
 # 排序误差，获取前5个最小误差的索引
 errors = np.array(errors)
@@ -935,24 +1073,40 @@ plt.savefig(os.path.join(checkpoint_dir, 'multi_solution_x_distribution.png'), d
 plt.close()
 
 # 可视化生成的X对应的Y预测（只显示误差最小的5个）
-plt.figure(figsize=(12, 6))
-plt.plot(freq_data, y_test_original[0], label='Original Y', color='blue', linewidth=2)
+# 实部
+plt.figure(figsize=(12, 8))
+plt.subplot(2, 1, 1)
+plt.plot(freq_data[:101], y_test_original[0, :101], label='Original Re(S11)', color='blue', linewidth=2)
 
 for i, idx in enumerate(top_indices):
-    plt.plot(freq_data, predicted_ys[idx], label=f'Predicted Y (Top {i+1}, Error: {errors[idx]:.6f})', alpha=0.7)
+    plt.plot(freq_data[:101], predicted_y[idx, :101], label=f'Predicted Re(S11) (Top {i+1}, Error: {errors[idx]:.6f})', alpha=0.7)
 
 plt.xlabel('Frequency (GHz)')
-plt.ylabel('S11')
-plt.title('Original Y vs Top 5 Predicted Y from Generated X')
+plt.ylabel('Re(S11)')
+plt.title('Original vs Top 5 Predicted Re(S11) from Generated X')
 plt.legend(loc='upper right', fontsize='small')
 plt.grid(True, alpha=0.3)
+
+# 虚部
+plt.subplot(2, 1, 2)
+plt.plot(freq_data[:101], y_test_original[0, 101:], label='Original Im(S11)', color='green', linewidth=2)
+
+for i, idx in enumerate(top_indices):
+    plt.plot(freq_data[:101], predicted_y[idx, 101:], label=f'Predicted Im(S11) (Top {i+1}, Error: {errors[idx]:.6f})', alpha=0.7)
+
+plt.xlabel('Frequency (GHz)')
+plt.ylabel('Im(S11)')
+plt.title('Original vs Top 5 Predicted Im(S11) from Generated X')
+plt.legend(loc='upper right', fontsize='small')
+plt.grid(True, alpha=0.3)
+
 plt.tight_layout()
 plt.savefig(os.path.join(checkpoint_dir, 'multi_solution_y_prediction.png'), dpi=150, bbox_inches='tight')
 plt.close()
 
 # 保存多解生成结果
 np.save(os.path.join(checkpoint_dir, 'generated_xs.npy'), reconstructed_xs)
-np.save(os.path.join(checkpoint_dir, 'predicted_ys.npy'), predicted_ys)
+np.save(os.path.join(checkpoint_dir, 'predicted_ys.npy'), predicted_y)
 
 # ============== 计算并保存逆向预测x正确率 ==============
 # 注意：逆向预测x的正确率已经在上面计算并保存过了，这里不再重复计算
