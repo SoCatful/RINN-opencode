@@ -182,13 +182,40 @@ def load_data_from_csv(data_path):
     
     return x_features, y_data, freq_data
 
-# 加载训练数据
-train_data_path = 'data/S Parameter Plot300.csv'
-train_x, train_y, freq_data = load_data_from_csv(train_data_path)
+# 加载所有数据文件
+data_files = ['data/S Parameter Plot300.csv', 'data/S Parameter Plot200.csv', 'data/S Parameter Plot1perfect.csv']
 
-# 加载验证数据
-val_data_path = 'data/S Parameter Plot200.csv'
-val_x, val_y, _ = load_data_from_csv(val_data_path)
+# 合并所有数据
+all_x = []
+all_y = []
+
+for file_path in data_files:
+    x, y, freq_data = load_data_from_csv(file_path)
+    all_x.append(x)
+    all_y.append(y)
+
+# 合并数据
+all_x = np.vstack(all_x)
+all_y = np.vstack(all_y)
+
+print(f'合并后总样本数: {len(all_x)}')
+
+# 划分训练集和验证集
+train_ratio = 0.8
+train_size = int(len(all_x) * train_ratio)
+val_size = len(all_x) - train_size
+
+# 随机划分
+indices = np.arange(len(all_x))
+np.random.shuffle(indices)
+
+train_indices = indices[:train_size]
+val_indices = indices[train_size:]
+
+train_x = all_x[train_indices]
+train_y = all_y[train_indices]
+val_x = all_x[val_indices]
+val_y = all_y[val_indices]
 
 print(f'\n训练集样本数: {len(train_x)}')
 print(f'验证集样本数: {len(val_x)}')
@@ -611,7 +638,16 @@ if not skip_training:
                 'left_input_dim': left_input_dim,
                 'right_input_dim': right_input_dim
             }
-            torch.save(checkpoint, os.path.join(checkpoint_dir, 'best_model.pth'))
+            # 添加调试信息
+            save_path = os.path.join(checkpoint_dir, 'best_model.pth')
+            print(f'  -> 准备保存最佳模型到: {save_path}')
+            print(f'  -> 目录是否存在: {os.path.exists(checkpoint_dir)}')
+            print(f'  -> 目录权限: {oct(os.stat(checkpoint_dir).st_mode)[-3:]}')
+            try:
+                torch.save(checkpoint, save_path)
+                print(f'  -> 保存成功! 文件大小: {os.path.getsize(save_path)} bytes')
+            except Exception as e:
+                print(f'  -> 保存失败: {e}')
             print(f'  -> 保存最佳模型 (Val Loss: {best_val_loss:.6f}, Epoch: {epoch+1})')
         else:
             patience_counter += 1
