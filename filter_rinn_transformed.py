@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+import json
 
 # 添加项目根目录到Python路径
 import sys
@@ -17,7 +18,7 @@ result_dir = 'result_RINN_transformed'
 os.makedirs(result_dir, exist_ok=True)
 
 # 加载最佳模型
-model_path = 'model_checkpoints_rinn/rinn_correct_structure_20260212_185857/best_model.pth'
+model_path = 'model_checkpoints_rinn/rinn_correct_structure_20260212_223456/best_model.pth'
 checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
 
 # 恢复模型参数
@@ -107,58 +108,97 @@ def apply_rinn_model(data):
         # 归一化
         y_normalized = (y_data - y_mean) / (y_std + 1e-8)
         
-        # 生成随机Z
-        z_data = np.random.randn(1, z_dim).astype(np.float32)
-        
-        # 右侧输入：Y + Z
-        right_input = np.concatenate((y_normalized, z_data), axis=1)
-        right_input = torch.FloatTensor(right_input)
-        
-        # 逆向预测：重建几何参数
-        with torch.no_grad():
-            reconstructed_left, _ = model.inverse(right_input)
-            
-            # 提取重建的X
-            reconstructed_x_normalized = reconstructed_left[:, :x_dim]
-            reconstructed_x = reconstructed_x_normalized.numpy() * x_std + x_mean
-        
-        # 正向预测：使用重建的X预测Y
-        with torch.no_grad():
-            # 左侧输入：重建的X + 零填充
-            padding_dim = y_dim
-            left_input = np.concatenate((reconstructed_x_normalized.numpy(), np.zeros((1, padding_dim), dtype=np.float32)), axis=1)
-            left_input = torch.FloatTensor(left_input)
-            
-            # 正向预测
-            predicted_right, _ = model(left_input)
-            
-            # 提取预测的Y
-            predicted_y_normalized = predicted_right[:, :y_dim]
-            predicted_y = predicted_y_normalized.numpy() * y_std + y_mean
-        
-        # 分离实部和虚部
-        predicted_real = predicted_y[0, :101]
-        predicted_imag = predicted_y[0, 101:]
-        
-        # 计算S11值
+        # 计算原始S11
         def calculate_s11(real, imag):
             s11_complex = real + 1j * imag
             s11_abs = np.abs(s11_complex)
             s11_dB = 20 * np.log10(s11_abs)
             return s11_dB
+
+        # 计算NMSE
+        def calculate_nmse(original, predicted):
+            """计算归一化均方误差"""
+            mse = np.mean((original - predicted) ** 2)
+            variance = np.var(original)
+            if variance == 0:
+                return 0
+            nmse = mse / variance
+            return nmse
         
         original_s11 = calculate_s11(real_part, imag_part)
-        predicted_s11 = calculate_s11(predicted_real, predicted_imag)
         
-        # 存储结果
+        # 采样100个Z值并选择最佳结果
+        print(f"Sampling 100 Z values for {data_type} data...")
+        best_nmse = float('inf')
+        best_result = None
+        
+        for i in range(100):
+            # 生成随机Z
+            z_data = np.random.randn(1, z_dim).astype(np.float32)
+            
+            # 右侧输入：Y + Z
+            right_input = np.concatenate((y_normalized, z_data), axis=1)
+            right_input = torch.FloatTensor(right_input)
+            
+            # 逆向预测：重建几何参数
+            with torch.no_grad():
+                reconstructed_left, _ = model.inverse(right_input)
+                
+                # 提取重建的X
+                reconstructed_x_normalized = reconstructed_left[:, :x_dim]
+                reconstructed_x = reconstructed_x_normalized.numpy() * x_std + x_mean
+            
+            # 正向预测：使用重建的X预测Y
+            with torch.no_grad():
+                # 左侧输入：重建的X + 零填充
+                padding_dim = y_dim
+                left_input = np.concatenate((reconstructed_x_normalized.numpy(), np.zeros((1, padding_dim), dtype=np.float32)), axis=1)
+                left_input = torch.FloatTensor(left_input)
+                
+                # 正向预测
+                predicted_right, _ = model(left_input)
+                
+                # 提取预测的Y
+                predicted_y_normalized = predicted_right[:, :y_dim]
+                predicted_y = predicted_y_normalized.numpy() * y_std + y_mean
+            
+            # 分离实部和虚部
+            predicted_real = predicted_y[0, :101]
+            predicted_imag = predicted_y[0, 101:]
+            
+            # 计算预测的S11
+            predicted_s11 = calculate_s11(predicted_real, predicted_imag)
+            
+            # 计算NMSE
+            nmse = calculate_nmse(original_s11, predicted_s11)
+            
+            # 更新最佳结果
+            if nmse < best_nmse:
+                best_nmse = nmse
+                best_result = {
+                    'reconstructed_x': reconstructed_x[0],
+                    'predicted_real': predicted_real,
+                    'predicted_imag': predicted_imag,
+                    'predicted_s11': predicted_s11,
+                    'nmse': nmse
+                }
+            
+            # 每10个Z值打印一次进度
+            if (i + 1) % 10 == 0:
+                print(f"  Processed {i + 1}/100 Z values, current best NMSE: {best_nmse:.6f}")
+        
+        print(f"Best NMSE for {data_type} data: {best_nmse:.6f}")
+        
+        # 存储最佳结果
         results[data_type] = {
             'real': real_part,
             'imag': imag_part,
-            'reconstructed_x': reconstructed_x[0],
-            'predicted_real': predicted_real,
-            'predicted_imag': predicted_imag,
+            'reconstructed_x': best_result['reconstructed_x'],
+            'predicted_real': best_result['predicted_real'],
+            'predicted_imag': best_result['predicted_imag'],
             'original_s11': original_s11,
-            'predicted_s11': predicted_s11
+            'predicted_s11': best_result['predicted_s11'],
+            'nmse': best_result['nmse']
         }
     
     return results
@@ -168,15 +208,14 @@ def plot_reconstructed_parameters_and_curves(results):
     """生成包含重建几何参数和Re/Im曲线的图"""
     freq = results['freq']
     
-    # 获取所有几何参数范围
-    all_x = []
-    for data_type in ['original', 'negative', 'symmetric']:
-        if data_type in results:
-            all_x.append(results[data_type]['reconstructed_x'])
+    # 加载几何参数范围
+    param_ranges = {}
+    if os.path.exists('geometry_params_ranges.json'):
+        with open('geometry_params_ranges.json', 'r') as f:
+            param_ranges = json.load(f)
     
-    all_x = np.vstack(all_x)
-    x_min = all_x.min(axis=0)
-    x_max = all_x.max(axis=0)
+    # 参数名称
+    params = ['H1', 'H2', 'H3', 'H_C1', 'H_C2']
     
     # 为每个数据类型生成图
     for data_type in ['original', 'negative', 'symmetric']:
@@ -189,26 +228,58 @@ def plot_reconstructed_parameters_and_curves(results):
         imag_part = data['imag']
         predicted_real = data['predicted_real']
         predicted_imag = data['predicted_imag']
+        nmse = data.get('nmse', 0)
         
-        # 创建图
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15))
+        # 创建图：5个几何参数子图（横向排列） + 2个曲线子图（纵向排列）
+        fig = plt.figure(figsize=(20, 15))
         
-        # 第一个子图：重建几何参数
-        params = ['H1', 'H2', 'H3', 'H_C1', 'H_C2']
-        x = np.arange(len(params))
-        width = 0.4
+        # 创建整个图表的网格布局
+        gs = fig.add_gridspec(3, 5, height_ratios=[1, 1, 1], width_ratios=[1, 1, 1, 1, 1])
         
-        ax1.bar(x - width/2, reconstructed_x, width, label='Reconstructed Parameters', color='blue')
-        ax1.set_xlabel('Geometry Parameters')
-        ax1.set_ylabel('Parameter Value (mm)')
-        ax1.set_title(f'Reconstructed Geometry Parameters ({data_type} data)')
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(params)
-        ax1.set_ylim([x_min.min() * 0.95, x_max.max() * 1.05])
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        # 创建5个几何参数子图（第一行横向排列）
+        param_axes = []
+        for i, (param, value) in enumerate(zip(params, reconstructed_x)):
+            ax = fig.add_subplot(gs[0, i])
+            param_axes.append(ax)
+            
+            # 绘制竖线代表数轴
+            ax.axvline(x=0.5, color='black', linewidth=1)
+            
+            # 获取参数范围
+            if param in param_ranges:
+                y_min = param_ranges[param]['min']
+                y_max = param_ranges[param]['max']
+                
+                # 绘制上下界参考线
+                ax.axhline(y=y_min, xmin=0.2, xmax=0.8, color='green', linestyle='--', linewidth=1, label=f'{param} min')
+                ax.axhline(y=y_max, xmin=0.2, xmax=0.8, color='red', linestyle='--', linewidth=1, label=f'{param} max')
+                
+                # 绘制取值（空心圆圈）
+                if value < y_min or value > y_max:
+                    # 超出范围，用橙色圆圈
+                    ax.scatter(0.5, value, s=100, facecolors='none', edgecolors='orange', linewidths=2, label=f'{param} Value')
+                    # 添加文本标注
+                    ax.text(0.5, value, f'Out of range', 
+                             ha='center', va='bottom' if value > y_max else 'top',
+                             fontsize=8, color='red')
+                else:
+                    # 在范围内，用蓝色圆圈
+                    ax.scatter(0.5, value, s=100, facecolors='none', edgecolors='blue', linewidths=2, label=f'{param} Value')
+                
+                # 设置Y轴范围
+                ax.set_ylim([y_min * 0.95, y_max * 1.05])
+            
+            # 设置子图属性
+            ax.set_title(f'{param}', fontsize=12)
+            ax.set_ylabel('Parameter Value (mm)', fontsize=10)
+            ax.set_xticks([])
+            ax.set_xlim([0, 1])
+            
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3, axis='y')
         
-        # 第二个子图：实部曲线
+        # 创建实部曲线子图（第二行，跨越所有5列）
+        ax2 = fig.add_subplot(gs[1, :])
         ax2.plot(freq/1e9, real_part, 'blue', linewidth=2, label='Original Re(S11)')
         ax2.plot(freq/1e9, predicted_real, 'red', linestyle='--', linewidth=2, label='Predicted Re(S11)')
         ax2.set_xlabel('Frequency (GHz)')
@@ -218,7 +289,8 @@ def plot_reconstructed_parameters_and_curves(results):
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # 第三个子图：虚部曲线
+        # 创建虚部曲线子图（第三行，跨越所有5列）
+        ax3 = fig.add_subplot(gs[2, :])
         ax3.plot(freq/1e9, imag_part, 'blue', linewidth=2, label='Original Im(S11)')
         ax3.plot(freq/1e9, predicted_imag, 'red', linestyle='--', linewidth=2, label='Predicted Im(S11)')
         ax3.set_xlabel('Frequency (GHz)')
@@ -228,7 +300,11 @@ def plot_reconstructed_parameters_and_curves(results):
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
-        plt.tight_layout()
+        # 设置整个图表的标题
+        fig.suptitle(f'Reconstructed Geometry Parameters and S11 Curves ({data_type} data)\nBest NMSE: {nmse:.6f}', fontsize=16, y=0.98)
+        
+        # 调整布局
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
         save_path = os.path.join(result_dir, f'{data_type}_parameters_and_curves.png')
         plt.savefig(save_path, dpi=300)
         plt.close()
