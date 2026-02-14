@@ -844,77 +844,115 @@ for i, test_idx in enumerate(test_indices):
     plt.close()
     print(f'  Plot saved for sample {i+1}: fixed_x_predicted_y_{i+1}.png')
 
-# ============== 模型功能实现：固定y回推x ==============
-print('\n=== Fixed y backward predicting x functionality ===')
+# ============== 模型功能实现：固定y回推x（多Z采样+NMSE选优） ==============
+print('\n=== Fixed y backward predicting x with multi-Z sampling (500 candidates) ===')
 
 # 从验证集中选取测试样本，使用全部验证集样本
 y_test_indices = list(range(val_size))  # 使用全部验证集样本
-print(f'验证集大小: {val_size}, 使用全部样本进行逆向预测')
+num_z_candidates = 500  # 每个样本采样500个Z进行选优
+print(f'验证集大小: {val_size}, 每个样本采样 {num_z_candidates} 个Z进行选优')
 
 # 存储逆向预测的结果，用于计算正确率
 backward_results = []
 all_relative_errors = []
+all_best_nmse = []  # 存储每个样本的最佳NMSE
+
+print('\n开始多Z采样回推（使用NMSE进行选优）...')
 
 for i, y_test_idx in enumerate(y_test_indices):
     if i % 10 == 0:  # 每10个样本打印一次进度
-        print(f'\nBackward predicting x for test sample {i+1}/{val_size}:')
+        print(f'\nProcessing sample {i+1}/{val_size}:')
     
     # 从验证集中选取一个测试样本
     y_test = val_y_normalized[y_test_idx:y_test_idx+1]  # 形状：(1, y_dim)
-
-    # 创建右侧输入：Y + Z（Z是随机生成的标准高斯分布）
-    z_test = np.random.randn(1, z_dim).astype(np.float32)
-    right_test_input = np.concatenate((y_test, z_test), axis=1)
-    right_test_input = torch.FloatTensor(right_test_input).to(device)
-
-    # 使用模型进行反向预测
-    with torch.no_grad():
-        reconstructed_left, _ = model.inverse(right_test_input)
-        
-        # 从reconstructed_left中提取X'
-        reconstructed_x_normalized = reconstructed_left[:, :x_dim]
-        
-        # 反标准化得到回推的x
-        reconstructed_x = reconstructed_x_normalized.cpu().numpy() * x_std + x_mean
-
+    real_y = val_y[y_test_idx:y_test_idx+1]  # 真实Y值（未归一化）
+    real_y = real_y[:, :y_dim]  # 确保维度正确
+    
     # 获取真实的x值
     real_x = val_x[y_test_idx:y_test_idx+1]
 
+    # Step 1: 采样500个Z
+    z_candidates = np.random.randn(num_z_candidates, z_dim).astype(np.float32)
+    
+    # Step 2: 批量回推500个X
+    y_test_repeated = np.repeat(y_test, num_z_candidates, axis=0)
+    right_test_inputs = np.concatenate((y_test_repeated, z_candidates), axis=1)
+    right_test_inputs = torch.FloatTensor(right_test_inputs).to(device)
+    
+    with torch.no_grad():
+        reconstructed_lefts, _ = model.inverse(right_test_inputs)
+        reconstructed_xs_normalized = reconstructed_lefts[:, :x_dim]
+        reconstructed_xs = reconstructed_xs_normalized.cpu().numpy() * x_std + x_mean
+    
+    # Step 3: 对每个回推的X进行正向预测，计算NMSE
+    nmse_errors = []
+    for j in range(num_z_candidates):
+        # 准备左侧输入：回推的X + 零填充
+        x_norm = (reconstructed_xs[j:j+1] - x_mean) / (x_std + 1e-8)
+        left_input = np.concatenate((x_norm, np.zeros((1, padding_dim), dtype=np.float32)), axis=1)
+        left_input = torch.FloatTensor(left_input).to(device)
+        
+        # 正向预测Y
+        with torch.no_grad():
+            predicted_right, _, _ = model(left_input, return_intermediate=True)
+            predicted_y_normalized = predicted_right[:, :y_dim]
+            predicted_y = predicted_y_normalized.cpu().numpy() * y_std + y_mean
+        
+        # 计算NMSE（针对Y的202维数据）
+        mse = np.mean((predicted_y[0] - real_y[0]) ** 2)
+        variance = np.var(real_y[0])
+        nmse = mse / (variance + 1e-8)
+        nmse_errors.append(nmse)
+    
+    # Step 4: 选择NMSE最小的回推结果
+    best_idx = np.argmin(nmse_errors)
+    best_reconstructed_x = reconstructed_xs[best_idx]
+    best_nmse = nmse_errors[best_idx]
+    
     if i % 10 == 0:  # 每10个样本打印一次结果
-        print(f'  Test sample {i+1} backward result:')
-        print(f'    Real x: {real_x[0]}')
-        print(f'    Backward x: {reconstructed_x[0]}')
+        print(f'  Best NMSE: {best_nmse:.6f} (from {num_z_candidates} candidates)')
+        print(f'  Real x: {real_x[0]}')
+        print(f'  Best backward x: {best_reconstructed_x}')
     
     # 计算每个参数的相对误差
-    relative_errors = np.abs((reconstructed_x[0] - real_x[0]) / (real_x[0] + 1e-8))
+    relative_errors = np.abs((best_reconstructed_x - real_x[0]) / (real_x[0] + 1e-8))
     all_relative_errors.append(relative_errors)
+    all_best_nmse.append(best_nmse)
     
     if i % 10 == 0:  # 每10个样本打印一次误差
         print(f'    Relative errors: {relative_errors}')
+        print(f'    Avg relative error: {np.mean(relative_errors):.6f}')
     
     # 存储结果
     backward_results.append({
         'real_x': real_x[0].tolist(),
-        'predicted_x': reconstructed_x[0].tolist(),
-        'relative_errors': relative_errors.tolist()
+        'predicted_x': best_reconstructed_x.tolist(),
+        'relative_errors': relative_errors.tolist(),
+        'best_nmse': float(best_nmse),
+        'best_z_idx': int(best_idx)
     })
 
-# 计算所有样本的平均相对误差
+# 计算所有样本的统计指标
 all_relative_errors = np.array(all_relative_errors)
 avg_relative_error = np.mean(all_relative_errors)
 accuracy = 1.0 - avg_relative_error
+avg_best_nmse = np.mean(all_best_nmse)
 
-print(f'\n=== 计算逆向预测x正确率 ===')
-print(f'使用全部验证集样本 ({val_size}个) 计算逆向预测x的平均相对误差')
-print(f'逆向预测x的平均相对误差: {avg_relative_error:.6f}')
-print(f'逆向预测x的正确率: {accuracy:.6f}')
+print(f'\n=== 多Z采样回推结果统计（{num_z_candidates} candidates per sample）===')
+print(f'验证集样本数: {val_size}')
+print(f'平均最佳NMSE: {avg_best_nmse:.6f}')
+print(f'平均相对误差: {avg_relative_error:.6f}')
+print(f'回推准确率: {accuracy:.6f}')
+print(f'NMSE统计 - 最小: {np.min(all_best_nmse):.6f}, 最大: {np.max(all_best_nmse):.6f}, 标准差: {np.std(all_best_nmse):.6f}')
 
-# 将逆向预测x的平均相对误差保存到文件
+# 保存结果到文件
 best_val_loss_file = os.path.join(checkpoint_dir, 'best_val_loss.txt')
 with open(best_val_loss_file, 'a') as f:
+    f.write(f'\n=== Multi-Z Backward Prediction Results ({num_z_candidates} candidates) ===\n')
+    f.write(f'Average Best NMSE: {avg_best_nmse:.6f}\n')
     f.write(f'Backward Prediction Avg Relative Error: {avg_relative_error:.6f}\n')
     f.write(f'Backward Prediction Accuracy: {accuracy:.6f}\n')
-print(f'逆向预测结果已追加保存到: {best_val_loss_file}')
+print(f'多Z采样回推结果已保存到: {best_val_loss_file}')
 
 # 保存逆向预测的详细结果
 backward_prediction_results = {
@@ -924,12 +962,30 @@ backward_prediction_results = {
     'detailed_results': backward_results
 }
 
+# 更新保存结果，包含NMSE信息
+backward_prediction_results = {
+    'total_samples': val_size,
+    'num_z_candidates': num_z_candidates,
+    'average_relative_error': float(avg_relative_error),
+    'accuracy': float(accuracy),
+    'average_best_nmse': float(avg_best_nmse),
+    'nmse_statistics': {
+        'min': float(np.min(all_best_nmse)),
+        'max': float(np.max(all_best_nmse)),
+        'mean': float(np.mean(all_best_nmse)),
+        'std': float(np.std(all_best_nmse)),
+        'median': float(np.median(all_best_nmse))
+    },
+    'detailed_results': backward_results
+}
+
 # 保存结果到文件
 results_file = os.path.join(checkpoint_dir, 'backward_prediction_results.json')
 with open(results_file, 'w', encoding='utf-8') as f:
     json.dump(backward_prediction_results, f, ensure_ascii=False, indent=2)
 
-print(f'逆向预测结果已保存到: {results_file}')
+print(f'\n多Z采样回推详细结果已保存到: {results_file}')
+print(f'每个样本使用了 {num_z_candidates} 个Z候选进行选优')
 
 # 可视化前5个样本的结果作为示例
 print('\n=== 可视化前5个样本的逆向预测结果 ===')
@@ -1066,21 +1122,28 @@ for i, y_test_idx in enumerate(y_test_indices[:5]):
     plt.close()
     print(f'  Plot saved for sample {i+1}: fixed_y_backward_x_{i+1}.png')
 
-# ============== 多解生成功能测试 ==============
-print('\n=== Multiple solutions generation functionality test ===')
+# ============== 多解生成功能测试（500个Z + NMSE选优） ==============
+print('\n=== Multiple solutions generation with 500 candidates (NMSE-based selection) ===')
 
 # 选择一个特定的测试样本进行多解生成
 multi_solution_idx = 0
 y_test = val_y_normalized[multi_solution_idx:multi_solution_idx+1]  # 形状：(1, y_dim)
 real_x = val_x[multi_solution_idx:multi_solution_idx+1]  # 真实的x值
 
-# 对于同一个y，生成多个z样本
-num_samples = 50  # 50 prediction samples
+# 获取原始Y值（用于NMSE计算）
+y_test_original = val_y[multi_solution_idx:multi_solution_idx+1]
+y_test_original = y_test_original[:, :y_dim]  # 确保维度正确
+
+# 对于同一个y，生成500个z样本
+num_samples = 500  # 500 prediction samples
 z_scale = 1.2  # Adjust Z sampling range to increase diversity and improve result fit
 z_samples = np.random.randn(num_samples, z_dim).astype(np.float32) * z_scale
 
+print(f'\nGenerating {num_samples} solutions for Y->X inverse prediction...')
+print(f'  Real x: {real_x[0]}')
+
 # 为每个z样本创建右侧输入
-y_test_repeated = np.repeat(y_test, num_samples, axis=0)  # Repeat y to match z_samples quantity
+y_test_repeated = np.repeat(y_test, num_samples, axis=0)
 right_test_inputs = np.concatenate((y_test_repeated, z_samples), axis=1)
 right_test_inputs = torch.FloatTensor(right_test_inputs).to(device)
 
@@ -1101,53 +1164,55 @@ x_max = all_x.max(axis=0)
 reconstructed_xs_clipped = np.clip(reconstructed_xs, x_min, x_max)
 
 # 验证X的多样性
-print(f'\nMultiple solutions generation results:')
-print(f'  Number of generated solutions: {num_samples}')
-print(f'  Real x: {real_x[0]}')
-
-# 计算生成的X之间的多样性（标准差）
 diversity = np.std(reconstructed_xs_clipped, axis=0)
-print(f'\nX diversity (standard deviation for each parameter): {diversity}')
-print(f'  Average diversity: {np.mean(diversity)}')
+print(f'\nX diversity (standard deviation for each parameter):')
+for j, param_name in enumerate(['H1', 'H2', 'H3', 'H_C1', 'H_C2']):
+    print(f'  {param_name}: {diversity[j]:.4f}')
+print(f'  Average diversity: {np.mean(diversity):.4f}')
 
-# 验证生成的X的正确性：使用生成的X进行正向预测，检查是否接近原始Y
-print('\nVerifying correctness of generated X:')
+# 对每个生成的X进行正向预测，计算NMSE
+print('\nVerifying correctness using NMSE (Normalized Mean Square Error):')
 
-# 对每个生成的X进行正向预测
 generated_xs_normalized = (reconstructed_xs_clipped - x_mean) / (x_std + 1e-8)
 left_predict_inputs = np.concatenate((generated_xs_normalized, np.zeros((num_samples, padding_dim), dtype=np.float32)), axis=1)
 left_predict_inputs = torch.FloatTensor(left_predict_inputs).to(device)
 
 with torch.no_grad():
     predicted_rights, _ = model(left_predict_inputs)
-    
-    # 从predicted_rights中提取Y'，并确保维度是202维
-    predicted_y_normalized = predicted_rights[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
-    
-    # 反标准化得到预测的y
+    predicted_y_normalized = predicted_rights[:, :y_dim]
     predicted_y = predicted_y_normalized.cpu().numpy() * y_std + y_mean
 
-# 计算每个预测的Y与原始Y的误差
-y_test_original = val_y[multi_solution_idx:multi_solution_idx+1]  # Original unnormalized Y
+# 计算每个预测的Y与原始Y的NMSE
+nmse_errors = []
+y_variance = np.var(y_test_original[0])  # 计算原始Y的方差
 
-# 确保y_test_original维度正确
-y_test_original = y_test_original[:, :202]  # 只保留前202维（101维实部 + 101维虚部）
-
-errors = []
 for i in range(num_samples):
-    error = np.mean(np.abs(predicted_y[i] - y_test_original[0]))
-    errors.append(error)
-    # 只打印前5个解的误差，避免输出过多
+    mse = np.mean((predicted_y[i] - y_test_original[0]) ** 2)
+    nmse = mse / (y_variance + 1e-8)
+    nmse_errors.append(nmse)
+    
     if i < 5:
-        print(f'  Solution {i+1} Y prediction error: {error:.6f}')
+        print(f'  Solution {i+1} NMSE: {nmse:.6f}')
+
 if num_samples > 5:
     print(f'  ... and {num_samples - 5} more solutions')
 
-# 排序误差，获取前5个最小误差的索引
-errors = np.array(errors)
-top_indices = np.argsort(errors)[:5]
-print(f'\nTop 5 solutions with smallest error indices: {top_indices + 1}')
-print(f'Corresponding error values: {errors[top_indices]}')
+# 排序NMSE，获取统计信息
+nmse_errors = np.array(nmse_errors)
+print(f'\nNMSE Statistics:')
+print(f'  Min: {np.min(nmse_errors):.6f}')
+print(f'  Max: {np.max(nmse_errors):.6f}')
+print(f'  Mean: {np.mean(nmse_errors):.6f}')
+print(f'  Std: {np.std(nmse_errors):.6f}')
+print(f'  Median: {np.median(nmse_errors):.6f}')
+
+# 获取前5个最小NMSE的解
+top_indices = np.argsort(nmse_errors)[:5]
+print(f'\nTop 5 solutions with smallest NMSE:')
+for rank, idx in enumerate(top_indices, 1):
+    print(f'  Rank {rank}: Solution {idx + 1}, NMSE = {nmse_errors[idx]:.6f}')
+    print(f'    Predicted X: {reconstructed_xs_clipped[idx]}')
+    print(f'    Relative errors: {np.abs((reconstructed_xs_clipped[idx] - real_x[0]) / (real_x[0] + 1e-8))}')
 
 # 可视化生成的X的分布
 plt.figure(figsize=(12, 8))
@@ -1166,41 +1231,101 @@ plt.tight_layout()
 plt.savefig(os.path.join(checkpoint_dir, 'multi_solution_x_distribution.png'), dpi=150, bbox_inches='tight')
 plt.close()
 
-# 可视化生成的X对应的Y预测（只显示误差最小的5个）
-# 实部
-plt.figure(figsize=(12, 8))
-plt.subplot(2, 1, 1)
-plt.plot(freq_data[:101], y_test_original[0, :101], label='Original Re(S11)', color='blue', linewidth=2)
+# 可视化：X分布 + NMSE分布 + Top 5 Y预测
+fig = plt.figure(figsize=(16, 12))
 
-for i, idx in enumerate(top_indices):
-    plt.plot(freq_data[:101], predicted_y[idx, :101], label=f'Predicted Re(S11) (Top {i+1}, Error: {errors[idx]:.6f})', alpha=0.7)
+# 1. X参数分布（2行3列布局）
+for param_idx in range(x_dim):
+    ax = plt.subplot(3, 3, param_idx + 1)
+    ax.hist(reconstructed_xs_clipped[:, param_idx], bins=20, alpha=0.7, color='green', label='Generated X')
+    ax.axvline(real_x[0, param_idx], color='red', linestyle='--', linewidth=2, label='Real X')
+    ax.set_title(f'Parameter {param_idx + 1} Distribution')
+    ax.set_xlabel('Value (mm)')
+    ax.set_ylabel('Count')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
-plt.xlabel('Frequency (GHz)')
-plt.ylabel('Re(S11)')
-plt.title('Original vs Top 5 Predicted Re(S11) from Generated X')
-plt.legend(loc='upper right', fontsize='small')
-plt.grid(True, alpha=0.3)
+# 2. NMSE分布直方图
+ax_nmse = plt.subplot(3, 3, 6)
+ax_nmse.hist(nmse_errors, bins=30, alpha=0.7, color='blue', edgecolor='black')
+ax_nmse.axvline(np.min(nmse_errors), color='red', linestyle='--', linewidth=2, label=f'Best NMSE: {np.min(nmse_errors):.4f}')
+ax_nmse.axvline(np.mean(nmse_errors), color='orange', linestyle='--', linewidth=2, label=f'Mean NMSE: {np.mean(nmse_errors):.4f}')
+ax_nmse.set_title(f'NMSE Distribution ({num_samples} samples)')
+ax_nmse.set_xlabel('NMSE')
+ax_nmse.set_ylabel('Count')
+ax_nmse.legend()
+ax_nmse.grid(True, alpha=0.3)
 
-# 虚部
-plt.subplot(2, 1, 2)
-plt.plot(freq_data[:101], y_test_original[0, 101:], label='Original Im(S11)', color='green', linewidth=2)
+# 3. Top 5 解的Y预测 - 实部
+ax_re = plt.subplot(3, 1, 2)
+ax_re.plot(freq_data[:101], y_test_original[0, :101], 'blue', linewidth=2.5, label='Original Re(S11)')
+colors = ['red', 'green', 'orange', 'purple', 'brown']
+for rank, idx in enumerate(top_indices):
+    color = colors[rank % len(colors)]
+    ax_re.plot(freq_data[:101], predicted_y[idx, :101], color=color, linestyle='--', 
+               linewidth=1.5, alpha=0.8, label=f'Rank {rank+1} (NMSE: {nmse_errors[idx]:.4f})')
+ax_re.set_xlabel('Frequency (GHz)')
+ax_re.set_ylabel('Re(S11)')
+ax_re.set_title(f'Top 5 Predicted Re(S11) - Best NMSE: {nmse_errors[top_indices[0]]:.6f}')
+ax_re.set_xlim((10.5, 11.5))
+ax_re.legend(loc='upper right', fontsize='small')
+ax_re.grid(True, alpha=0.3)
 
-for i, idx in enumerate(top_indices):
-    plt.plot(freq_data[:101], predicted_y[idx, 101:], label=f'Predicted Im(S11) (Top {i+1}, Error: {errors[idx]:.6f})', alpha=0.7)
-
-plt.xlabel('Frequency (GHz)')
-plt.ylabel('Im(S11)')
-plt.title('Original vs Top 5 Predicted Im(S11) from Generated X')
-plt.legend(loc='upper right', fontsize='small')
-plt.grid(True, alpha=0.3)
+# 4. Top 5 解的Y预测 - 虚部
+ax_im = plt.subplot(3, 1, 3)
+ax_im.plot(freq_data[:101], y_test_original[0, 101:], 'green', linewidth=2.5, label='Original Im(S11)')
+for rank, idx in enumerate(top_indices):
+    color = colors[rank % len(colors)]
+    ax_im.plot(freq_data[:101], predicted_y[idx, 101:], color=color, linestyle='--', 
+               linewidth=1.5, alpha=0.8, label=f'Rank {rank+1} (NMSE: {nmse_errors[idx]:.4f})')
+ax_im.set_xlabel('Frequency (GHz)')
+ax_im.set_ylabel('Im(S11)')
+ax_im.set_title(f'Top 5 Predicted Im(S11) - Best NMSE: {nmse_errors[top_indices[0]]:.6f}')
+ax_im.set_xlim((10.5, 11.5))
+ax_im.legend(loc='upper right', fontsize='small')
+ax_im.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig(os.path.join(checkpoint_dir, 'multi_solution_y_prediction.png'), dpi=150, bbox_inches='tight')
+plt.savefig(os.path.join(checkpoint_dir, 'multi_solution_analysis.png'), dpi=300, bbox_inches='tight')
 plt.close()
+print(f'\nMulti-solution analysis saved: multi_solution_analysis.png')
 
 # 保存多解生成结果
 np.save(os.path.join(checkpoint_dir, 'generated_xs.npy'), reconstructed_xs)
 np.save(os.path.join(checkpoint_dir, 'predicted_ys.npy'), predicted_y)
+
+# 保存多解生成结果（包含NMSE信息）
+multi_solution_results = {
+    'num_candidates': num_samples,
+    'real_x': real_x[0].tolist(),
+    'x_diversity': {
+        'per_param': diversity.tolist(),
+        'average': float(np.mean(diversity))
+    },
+    'nmse_statistics': {
+        'min': float(np.min(nmse_errors)),
+        'max': float(np.max(nmse_errors)),
+        'mean': float(np.mean(nmse_errors)),
+        'std': float(np.std(nmse_errors)),
+        'median': float(np.median(nmse_errors))
+    },
+    'top_5_solutions': [
+        {
+            'rank': rank + 1,
+            'candidate_idx': int(idx),
+            'nmse': float(nmse_errors[idx]),
+            'predicted_x': reconstructed_xs_clipped[idx].tolist(),
+            'relative_errors': np.abs((reconstructed_xs_clipped[idx] - real_x[0]) / (real_x[0] + 1e-8)).tolist()
+        }
+        for rank, idx in enumerate(top_indices)
+    ],
+    'all_candidates_nmse': nmse_errors.tolist()
+}
+
+with open(os.path.join(checkpoint_dir, 'multi_solution_results.json'), 'w', encoding='utf-8') as f:
+    json.dump(multi_solution_results, f, ensure_ascii=False, indent=2)
+
+print('\n多解生成详细结果已保存到: multi_solution_results.json')
 
 # ============== 计算并保存逆向预测x正确率 ==============
 # 注意：逆向预测x的正确率已经在上面计算并保存过了，这里不再重复计算
