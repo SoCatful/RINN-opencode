@@ -428,7 +428,7 @@ def objective(trial):
         best_val_loss = train_model(
             model, left_train, left_val, train_y_normalized, val_y_normalized,
             batch_size, optimizer, scheduler,
-            num_epochs=50,  # 为了加快优化速度，使用较少的epoch
+            num_epochs=50,  # 完整优化：50 epochs
             x_dim=x_dim, y_dim=y_dim, z_dim=z_dim,
             weight_y=params["weight_y"],
             weight_x=params["weight_x"],
@@ -459,8 +459,8 @@ def main():
     )
     
     # 运行优化
-    n_trials = 5  # 快速测试：5次尝试
-    print(f"\n开始贝叶斯优化，计划运行 {n_trials} 次尝试...")
+    n_trials = 50  # 完整优化：50次尝试
+    print(f"\n开始贝叶斯优化（完整模式），计划运行 {n_trials} 次尝试...")
     study.optimize(objective, n_trials=n_trials, gc_after_trial=True, show_progress_bar=True)
     
     # 保存结果

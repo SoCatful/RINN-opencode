@@ -1,0 +1,40 @@
+[
+  {
+    "number": 0,
+    "value": 0.5929425656795502,
+    "params": {
+      "hidden_dim": 64,
+      "num_blocks": 8,
+      "num_stages": 3,
+      "num_cycles_per_stage": 2,
+      "ratio_toZ_after_flowstage": 0.19361118426546192,
+      "ratio_x1_x2_inAffine": 0.1201975341512912,
+      "batch_size": 32,
+      "learning_rate": 0.0002607024758370766,
+      "weight_decay": 1.0994335574766194e-06,
+      "weight_y": 1.9548647782429915,
+      "weight_x": 0.8491983767203796,
+      "weight_z": 0.18493564427131048
+    },
+    "state": "COMPLETE"
+  },
+  {
+    "number": 1,
+    "value": 0.9478386823947613,
+    "params": {
+      "hidden_dim": 48,
+      "num_blocks": 4,
+      "num_stages": 2,
+      "num_cycles_per_stage": 2,
+      "ratio_toZ_after_flowstage": 0.35916701118526945,
+      "ratio_x1_x2_inAffine": 0.18105311308911887,
+      "batch_size": 16,
+      "learning_rate": 5.4041038546473305e-05,
+      "weight_decay": 8.168455894760166e-06,
+      "weight_y": 1.6777639420895203,
+      "weight_x": 0.2797064039425238,
+      "weight_z": 0.3056937753654447
+    },
+    "state": "COMPLETE"
+  }
+]
