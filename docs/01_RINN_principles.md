@@ -76,7 +76,7 @@ x₂ = (x₂' - translate) × exp(-scale)
 
 ## 4. 训练目标
 
-### 4.1 最大似然估计
+### 4.1 传统最大似然估计
 
 目标：最大化数据的对数似然
 
@@ -89,10 +89,78 @@ log p(x) = log p(z) + log|det(J)|
 - `p(z)`：高斯先验
 - `J`：雅可比矩阵
 
-### 4.2 损失函数
+### 4.2 新训练逻辑
+
+我们实现了一种创新的训练逻辑，显著提高了模型性能和稳定性：
+
+**每个batch的处理流程：**
+1. **正向预测**：
+   - X（几何参数）拼接0填充，形成左侧输入
+   - 模型正向预测得到Y（S参数）和Z（潜在变量）
+   - 计算预测Z与标准正态分布的MMD损失
+
+2. **反向回推**：
+   - 随机生成一批新的Z样本
+   - 拼接真实Y，形成右侧输入
+   - 模型反向回推得到X
+   - 计算回推X与真实X的MMD损失
+
+3. **损失计算**：
+   - Y预测损失：加权NMSE
+   - Z分布损失：MMD
+   - X回推损失：MMD
+   - 总损失：组合三个损失项
+
+### 4.3 损失函数实现
 
 ```python
-loss = -mean(log_p(z) + log_det_J)
+def calculate_loss(left_input, right_input):
+    # 正向映射：left_input → predicted_right
+    predicted_right, log_det_forward, _ = model(left_input, return_intermediate=True)
+    
+    # 从predicted_right中提取Y'和Z'
+    predicted_y = predicted_right[:, :y_dim]
+    predicted_z = predicted_right[:, y_dim:]
+    
+    # 从right_input中提取真实Y
+    real_y = right_input[:, :y_dim]
+    
+    # 1. Y预测损失：加权NMSE
+    y_loss = weighted_nmse_loss(real_y, predicted_y)
+    
+    # 2. Z分布约束：predicted_z与标准高斯分布的MMD差异
+    z_target = torch.randn_like(predicted_z).to(device)  # 标准高斯分布
+    z_loss = mmd_loss(predicted_z, z_target)
+    
+    # 3. 随机生成Z，拼接Y回推X，计算X的MMD损失
+    # 随机生成一批Z
+    batch_size = left_input.size(0)
+    random_z = torch.randn(batch_size, z_dim).to(device)
+    
+    # 拼接Y和随机生成的Z
+    right_input_random_z = torch.cat((real_y, random_z), dim=1)
+    
+    # 反向映射：Y+Z → X+0填充
+    reconstructed_left, _ = model.inverse(right_input_random_z)
+    
+    # 从reconstructed_left中提取X'
+    reconstructed_x = reconstructed_left[:, :x_dim]
+    
+    # 从left_input中提取真实X
+    real_x = left_input[:, :x_dim]
+    
+    # 使用MMD损失计算x损失
+    x_loss = mmd_loss(real_x, reconstructed_x)
+    
+    # 总损失：组合三个损失项
+    total_loss = weight_y * y_loss + weight_x * x_loss + weight_z * z_loss
+    
+    return {
+        "total_loss": total_loss,
+        "y_loss": y_loss,
+        "x_loss": x_loss,
+        "z_loss": z_loss
+    }
 ```
 
 ## 5. 双向应用

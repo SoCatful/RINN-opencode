@@ -2,344 +2,220 @@
 
 ## 概述
 
-本文档描述使用R-INN模型进行**正向预测**和**反向设计**的完整工作流程。
+本文档描述使用R-INN模型进行**正向预测**、**反向设计**和**训练**的完整工作流程，基于v1.0版本的最新实现。
 
 ---
 
-## 一、正向预测：X → Y
+## 一、训练流程
 
-### 1.1 流程图
+### 1.1 新训练逻辑
+
+```
+每个batch处理：
+┌─────────────────────┐     ┌─────────────────────┐
+│ 正向预测流程        │     │ 反向回推流程        │
+├─────────────────────┤     ├─────────────────────┤
+│ 1. X拼接0填充       │     │ 1. 随机生成Z        │
+│ 2. 正向预测Y和Z     │     │ 2. 拼接真实Y        │
+│ 3. 计算Z的MMD损失   │     │ 3. 反向回推X        │
+│ 4. 计算Y的NMSE损失  │     │ 4. 计算X的MMD损失   │
+└─────────────────────┘     └─────────────────────┘
+          ↓                           ↓
+┌─────────────────────────────────────┐
+│ 组合损失：weight_y*Y_loss +        │
+│ weight_x*X_loss + weight_z*Z_loss   │
+└─────────────────────────────────────┘
+```
+
+### 1.2 详细步骤
+
+#### 步骤1：数据准备
+- 加载训练数据：`S Parameter Plot200.csv` 和 `S Parameter Plot300.csv`
+- 加载验证数据：包含 `S Parameter Plot1perfect.csv` 的5个样本
+- 数据归一化：使用鲁棒归一化（中位数 + 四分位距）
+
+#### 步骤2：模型初始化
+- 配置模型参数：hidden_dim=64, num_blocks=8, num_stages=3
+- 配置训练参数：batch_size=32, learning_rate=0.000261
+- 配置损失权重：weight_y=1.955, weight_x=0.849, weight_z=0.185
+
+#### 步骤3：训练循环
+- 每个epoch重新采样Z，增强模型泛化能力
+- 使用梯度累积和学习率调度
+- 早停机制：patience=60
+
+#### 步骤4：模型保存
+- 保存最佳模型：基于验证损失
+- 保存训练配置和损失曲线
+
+---
+
+## 二、正向预测：X → Y
+
+### 2.1 流程图
 
 ```
 几何参数 X
     ↓
-标准化 (使用训练集的均值和标准差)
+标准化 (鲁棒归一化)
     ↓
-随机采样 Z ~ N(0,1)
+X拼接0填充 → 左侧输入
     ↓
-拼接 [X, Z]
+模型正向预测
     ↓
-输入 R-INN
-    ↓
-逆向变换 model.inverse([Z, ?])
-    ↓
-输出 Y (电磁响应)
+提取Y (前202维)
     ↓
 反标准化 (恢复原始尺度)
     ↓
 得到预测的S参数
 ```
 
-### 1.2 详细步骤
+### 2.2 详细步骤
 
 #### 步骤1：准备几何参数 X
-
-```python
-X = [a₁, a₂, a₃, a₄, a₅, l₁, l₂, l₃]  # 8维向量
-```
-
-确保参数在有效范围内：
-- 宽度：3.0-7.0 mm
-- 长度：5.0-15.0 mm
+- 确保参数在有效范围内
+- 参考几何参数分析文档
 
 #### 步骤2：数据标准化
-
 ```python
-X_normalized = (X - X_mean) / X_std
+# 使用鲁棒归一化
+X_normalized = (X - X_median) / X_iqr
 ```
 
-使用训练集计算得到的均值和标准差。
-
-#### 步骤3：采样潜变量 Z
-
+#### 步骤3：模型推理
 ```python
-Z = torch.randn(batch_size, z_dim)
+# 左侧输入：X + 零填充
+left_input = np.concatenate((X_normalized, np.zeros((1, 202), dtype=np.float32)), axis=1)
+left_input = torch.FloatTensor(left_input).to(device)
+
+# 正向预测
+with torch.no_grad():
+    predicted_right, _, _ = model(left_input, return_intermediate=True)
+    predicted_y_normalized = predicted_right[:, :202]
 ```
 
-`z_dim` 取决于模型架构。
-
-#### 步骤4：模型推理
-
+#### 步骤4：解析输出
 ```python
-# 拼接输入
-input_data = torch.cat([Z, X_normalized], dim=-1)
-
-# 逆向变换
-Y_normalized, _ = model.inverse(input_data)
-
 # 反标准化
-Y = Y_normalized * Y_std + Y_mean
-```
+predicted_y = predicted_y_normalized.cpu().numpy() * y_iqr + y_median
 
-#### 步骤5：解析输出
-
-```python
-# 当前方案 (202维)
-Re_S11 = Y[:, :101]  # 前101维：实部
-Im_S11 = Y[:, 101:]  # 后101维：虚部
+# 解析实部和虚部
+Re_S11 = predicted_y[:, :101]  # 前101维：实部
+Im_S11 = predicted_y[:, 101:]  # 后101维：虚部
 
 # 计算幅度和dB
 mag_S11 = np.sqrt(Re_S11**2 + Im_S11**2)
 dB_S11 = 20 * np.log10(mag_S11)
 ```
 
-### 1.3 代码示例
-
-```python
-def predict_forward(model, X, Y_mean, Y_std, X_mean, X_std, num_samples=10):
-    """
-    正向预测：X → Y
-    
-    参数:
-        model: 训练好的R-INN模型
-        X: 几何参数 [batch_size, 8]
-        Y_mean, Y_std: Y的统计信息
-        X_mean, X_std: X的统计信息
-        num_samples: 采样Z的次数
-    
-    返回:
-        Y_pred: 预测的Y [num_samples, batch_size, 202]
-    """
-    model.eval()
-    X_normalized = (X - X_mean) / X_std
-    
-    Y_samples = []
-    with torch.no_grad():
-        for _ in range(num_samples):
-            # 随机采样Z
-            Z = torch.randn(X.shape[0], z_dim).to(X.device)
-            
-            # 拼接 [Z, X]
-            input_data = torch.cat([Z, X_normalized], dim=-1)
-            
-            # 逆向变换
-            Y_norm, _ = model.inverse(input_data)
-            
-            # 反标准化
-            Y = Y_norm * Y_std + Y_mean
-            Y_samples.append(Y)
-    
-    return torch.stack(Y_samples)
-```
-
 ---
 
-## 二、反向设计：Y → X
+## 三、反向设计：Y → X
 
-### 2.1 流程图
+### 3.1 流程图
 
 ```
 目标响应 Y_target
     ↓
 标准化
     ↓
-随机采样 Z ~ N(0,1)
+批量采样 Z ~ N(0,1) (500个样本)
     ↓
-拼接 [Z, Y_target]
+拼接 [Y_target, Z] (500个输入)
     ↓
-输入 R-INN
+并行反向回推
     ↓
-逆向变换 model.inverse([Z, Y_target])
-    ↓
-输出 X_candidate (几何参数候选)
+输出 X_candidates (500个候选)
     ↓
 反标准化
     ↓
-约束到有效范围 (clip/tanh)
+正向验证：X_candidate → Y_pred
     ↓
-得到候选几何参数
+计算每个候选的NMSE
     ↓
-【可选】正向验证：X_candidate → Y_pred
-    ↓
-比较 Y_pred vs Y_target
-    ↓
-评估是否接受此候选
+选择NMSE最小的最佳解
 ```
 
-### 2.2 详细步骤
+### 3.2 详细步骤
 
-#### 步骤1：准备目标响应 Y
+#### 步骤1：准备目标响应 Y_target
+- 确保Y_target维度为202（101维实部 + 101维虚部）
+- 进行鲁棒归一化
 
+#### 步骤2：批量采样Z
 ```python
-Y_target = [Re_S11_1, ..., Re_S11_101, Im_S11_1, ..., Im_S11_101]
+# 生成500个Z样本
+num_candidates = 500
+z_scale = 1.2  # 控制多样性
+z_candidates = np.random.randn(num_candidates, z_dim).astype(np.float32) * z_scale
 ```
 
-#### 步骤2：标准化
-
+#### 步骤3：并行反向回推
 ```python
-Y_normalized = (Y_target - Y_mean) / Y_std
+# 批量处理500个输入
+y_repeated = np.repeat(Y_target_normalized, num_candidates, axis=0)
+right_inputs = np.concatenate((y_repeated, z_candidates), axis=1)
+right_inputs = torch.FloatTensor(right_inputs).to(device)
+
+# 并行反向回推
+with torch.no_grad():
+    reconstructed_lefts, _ = model.inverse(right_inputs)
+    reconstructed_xs_normalized = reconstructed_lefts[:, :x_dim]
+    reconstructed_xs = reconstructed_xs_normalized.cpu().numpy() * x_iqr + x_median
 ```
 
-#### 步骤3：采样Z并生成候选X
-
+#### 步骤4：智能选优
 ```python
-# 采样多个Z，生成多个候选
-X_candidates = []
-for _ in range(num_z_samples):
-    Z = torch.randn(1, z_dim)
-    input_data = torch.cat([Z, Y_normalized], dim=-1)
-    X_norm, _ = model.inverse(input_data)
-    X = X_norm * X_std + X_mean
-    X_candidates.append(X)
-```
-
-#### 步骤4：约束到有效范围
-
-```python
-# 方法1：硬裁剪
-X_clipped = torch.clamp(X, X_min, X_max)
-
-# 方法2：tanh约束
-X_constrained = X_min + (X_max - X_min) * (torch.tanh(X) + 1) / 2
-```
-
-#### 步骤5：验证（关键！）
-
-```python
-# 用生成的X重新预测Y
-Y_pred = predict_forward(model, X_constrained, ...)
-
-# 计算误差
-error = torch.mean((Y_pred - Y_target) ** 2)
-
-# 评估NMSE
-nmse = error / torch.mean(Y_target ** 2)
-```
-
-### 2.3 代码示例
-
-```python
-def design_reverse(model, Y_target, X_mean, X_std, Y_mean, Y_std, 
-                   num_samples=100, X_min=None, X_max=None):
-    """
-    反向设计：Y → X
-    
-    参数:
-        model: 训练好的R-INN模型
-        Y_target: 目标响应 [1, 202]
-        X_mean, X_std, Y_mean, Y_std: 统计信息
-        num_samples: 采样Z的次数
-        X_min, X_max: X的范围约束
-    
-    返回:
-        best_X: 最佳几何参数 [1, 8]
-        best_nmse: 对应的NMSE
-        all_results: 所有候选的结果
-    """
-    model.eval()
-    Y_normalized = (Y_target - Y_mean) / Y_std
-    
-    results = []
+# 对每个候选进行正向验证
+nmse_errors = []
+for i in range(num_candidates):
+    # 正向预测
+    x_norm = (reconstructed_xs[i:i+1] - x_median) / (x_iqr + 1e-8)
+    left_input = np.concatenate((x_norm, np.zeros((1, 202), dtype=np.float32)), axis=1)
+    left_input = torch.FloatTensor(left_input).to(device)
     
     with torch.no_grad():
-        for i in range(num_samples):
-            # 采样Z
-            Z = torch.randn(1, z_dim).to(Y_target.device)
-            
-            # 拼接 [Z, Y]
-            input_data = torch.cat([Z, Y_normalized], dim=-1)
-            
-            # 逆向变换得到X
-            X_norm, _ = model.inverse(input_data)
-            X = X_norm * X_std + X_mean
-            
-            # 约束到有效范围
-            if X_min is not None and X_max is not None:
-                X = torch.clamp(X, X_min, X_max)
-            
-            # 【关键】正向验证
-            Y_pred = predict_forward(model, X, Y_mean, Y_std, X_mean, X_std, num_samples=1)
-            
-            # 计算NMSE
-            nmse = torch.mean((Y_pred - Y_target) ** 2) / torch.mean(Y_target ** 2)
-            
-            results.append({
-                'X': X.cpu().numpy(),
-                'nmse': nmse.item(),
-                'Z': Z.cpu().numpy()
-            })
+        predicted_right, _, _ = model(left_input, return_intermediate=True)
+        predicted_y_normalized = predicted_right[:, :y_dim]
+        predicted_y = predicted_y_normalized.cpu().numpy() * y_iqr + y_median
     
-    # 按NMSE排序，返回最佳结果
-    results.sort(key=lambda x: x['nmse'])
-    best_result = results[0]
-    
-    return best_result['X'], best_result['nmse'], results
+    # 计算NMSE
+    mse = np.mean((predicted_y[0] - Y_target[0]) ** 2)
+    variance = np.var(Y_target[0])
+    nmse = mse / (variance + 1e-8)
+    nmse_errors.append(nmse)
+
+# 选择最佳解
+best_idx = np.argmin(nmse_errors)
+best_reconstructed_x = reconstructed_xs[best_idx]
 ```
 
 ---
 
-## 三、贝叶斯优化流程
+## 四、贝叶斯优化流程
 
-### 3.1 应用场景
+### 4.1 优化目标
+- 最小化验证损失
+- 优化模型超参数和训练参数
 
-当R-INN生成的X质量不够好时，使用贝叶斯优化微调。
+### 4.2 优化参数
+| 参数类别 | 参数 | 搜索范围 |
+|---------|------|----------|
+| 模型参数 | hidden_dim | [32, 128] |
+| 模型参数 | num_blocks | [4, 12] |
+| 模型参数 | num_stages | [2, 4] |
+| 训练参数 | batch_size | [16, 64] |
+| 训练参数 | learning_rate | [1e-5, 1e-3] |
+| 训练参数 | weight_decay | [1e-7, 1e-5] |
+| 损失权重 | weight_y | [0.5, 3.0] |
+| 损失权重 | weight_x | [0.1, 2.0] |
+| 损失权重 | weight_z | [0.01, 1.0] |
 
-### 3.2 流程
-
-```python
-from bayes_opt import BayesianOptimization
-
-def objective_function(a1, a2, a3, a4, a5, l1, l2, l3):
-    """目标函数：最小化预测Y与目标Y的差异"""
-    X = torch.tensor([[a1, a2, a3, a4, a5, l1, l2, l3]])
-    Y_pred = predict_forward(model, X, ...)
-    error = -torch.mean((Y_pred - Y_target) ** 2)  # 负值，因为bayes_opt求最大值
-    return error.item()
-
-# 定义搜索空间
-pbounds = {
-    'a1': (3.0, 7.0), 'a2': (3.0, 7.0), 'a3': (3.0, 7.0),
-    'a4': (3.0, 7.0), 'a5': (3.0, 7.0),
-    'l1': (5.0, 15.0), 'l2': (5.0, 15.0), 'l3': (5.0, 15.0)
-}
-
-# 初始化优化器
-optimizer = BayesianOptimization(
-    f=objective_function,
-    pbounds=pbounds,
-    random_state=42
-)
-
-# 执行优化
-optimizer.maximize(init_points=10, n_iter=50)
-
-# 最佳结果
-best_params = optimizer.max['params']
-```
-
----
-
-## 四、完整示例：从目标到设计
-
-```python
-# 1. 加载模型和数据
-checkpoint = torch.load('model_checkpoints_rinn/best_model.pth')
-model.load_state_dict(checkpoint['model_state_dict'])
-X_mean, X_std = checkpoint['X_mean'], checkpoint['X_std']
-Y_mean, Y_std = checkpoint['Y_mean'], checkpoint['Y_std']
-
-# 2. 定义目标响应（如理想滤波器）
-Y_target = generate_ideal_filter(target_dB=-26)  # 自定义函数
-
-# 3. 反向设计
-best_X, best_nmse, all_results = design_reverse(
-    model, Y_target, X_mean, X_std, Y_mean, Y_std,
-    num_samples=1000,  # 采样1000个Z
-    X_min=X_min, X_max=X_max
-)
-
-print(f"最佳NMSE: {best_nmse:.6f}")
-print(f"最佳几何参数: {best_X}")
-
-# 4. 【可选】贝叶斯优化微调
-if best_nmse > threshold:
-    refined_X = bayesian_optimize(model, Y_target, best_X, pbounds)
-    print(f"优化后参数: {refined_X}")
-
-# 5. 最终验证
-Y_final = predict_forward(model, best_X, ...)
-plot_comparison(Y_target, Y_final)  # 可视化对比
-```
+### 4.3 执行流程
+1. 初始化GPyOpt优化器
+2. 运行20-30轮优化迭代
+3. 选择最佳参数组合
+4. 使用最佳参数进行完整训练
 
 ---
 
@@ -347,56 +223,63 @@ plot_comparison(Y_target, Y_final)  # 可视化对比
 
 ### 5.1 必须做的事情
 
-✅ **始终使用标准化**：输入模型前标准化，输出后反标准化  
-✅ **采样多个Z**：一个Y对应多个X，采样多个Z找最佳  
-✅ **正向验证**：生成的X必须正向验证，计算NMSE  
-✅ **约束范围**：确保生成的X在有效范围内  
-✅ **检查可逆性**：定期验证模型的可逆性
+✅ **使用新训练逻辑**：正向预测 + 反向回推的组合损失  
+✅ **动态Z采样**：训练时每个epoch重新采样Z  
+✅ **批量生成**：推理时生成500个候选解  
+✅ **智能选优**：基于NMSE指标选择最佳解  
+✅ **鲁棒归一化**：使用中位数和四分位距进行数据归一化  
+✅ **全面验证**：对生成的X进行正向验证  
+✅ **约束范围**：确保生成的X在有效物理范围内  
 
 ### 5.2 不要做的事情
 
-❌ 不要直接使用未标准化的数据  
+❌ 不要使用旧的训练逻辑  
 ❌ 不要只采样一个Z就停止  
-❌ 不要忽视正向验证的NMSE  
+❌ 不要忽视Z的分布约束  
+❌ 不要使用未标准化的数据  
 ❌ 不要生成超出范围的X而不处理  
+❌ 不要忽视训练过程中的损失曲线  
 
 ---
 
 ## 六、故障排除
 
-### Q1: 生成的X对应的Y与目标Y差异大？
+### Q1: 训练损失不稳定？
+- **解决方案**：检查Z的MMD损失权重，适当调整weight_z
+- **建议**：确保Z的分布约束强度合理
 
-**原因**：
-- 训练数据未覆盖目标Y（OOD问题）
-- Z采样不够多
-- 模型训练不充分
+### Q2: 反向设计结果质量差？
+- **解决方案**：增加Z采样数量，提高z_scale值
+- **建议**：检查训练数据是否覆盖目标响应空间
 
-**解决**：
-- 增加Z采样数量
-- 使用贝叶斯优化微调
-- 扩充训练数据
+### Q3: 验证损失不下降？
+- **解决方案**：调整学习率和批量大小
+- **建议**：检查是否存在过拟合，增加早停patience
 
-### Q2: 生成的X超出有效范围？
+### Q4: 生成的X超出物理范围？
+- **解决方案**：在反向设计后对X进行裁剪
+- **建议**：基于训练数据的最小值和最大值设置合理范围
 
-**原因**：
-- 模型未学习到范围约束
-- 数据分布不均匀
+---
 
-**解决**：
-- 使用tanh/sigmoid限制
-- 后处理裁剪
-- 在训练时添加约束损失
+## 七、性能评估
 
-### Q3: NMSE很高？
+### 7.1 评估指标
+- **正向预测**：NMSE（归一化均方误差）
+- **反向设计**：相对误差、NMSE
+- **多解质量**：解的多样性、最佳解质量
 
-**检查清单**：
-- [ ] 标准化/反标准化是否正确？
-- [ ] 模型是否训练充分？
-- [ ] 是否采样了足够多的Z？
-- [ ] 目标Y是否在训练数据分布内？
+### 7.2 预期性能
+| 指标 | 目标值 |
+|------|--------|
+| 验证损失 | < 0.015 |
+| 验证集NMSE | < 0.01 |
+| 逆向预测准确率 | > 0.97 |
+| Top 1解相对误差 | < 0.03 |
 
 ---
 
 *文档编号: 03*  
-*创建日期: 2026-02-14*  
-*主题: 工作流程*
+*创建日期: 2026-02-15*  
+*主题: 工作流程*  
+*版本: v1.0*
