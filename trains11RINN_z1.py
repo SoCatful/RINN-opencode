@@ -2,7 +2,7 @@
 基于RINN模型的密度估计实现
 正确的数据结构和损失计算：
 1. 左侧输入：X(5维) + 零填充(202维) → 总207维
-2. 右侧输入：Y(202维) + Z(5维) → 总207维，其中Z是随机生成的标准高斯分布
+2. 右侧输入：Y(202维) + Z(1维) → 总203维，其中Z是随机生成的标准高斯分布
 3. 损失计算：
    - 正向预测的Y'和真实Y的NMSE损失
    - 重建X的损失
@@ -77,7 +77,7 @@ if args.config and os.path.exists(args.config):
 
 # ============== 创建训练输出文件夹 ==============
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-experiment_name = f"rinn_correct_structure_{timestamp}"
+experiment_name = f"rinn_correct_structure_z1_{timestamp}"
 checkpoint_dir = os.path.join('model_checkpoints_rinn', experiment_name)
 os.makedirs(checkpoint_dir, exist_ok=True)
 print(f'本次训练输出文件夹: {checkpoint_dir}')
@@ -314,19 +314,19 @@ print('\n=== 维度处理与数据结构 ===')
 # 配置参数
 x_dim = train_x.shape[1]  # X维度：5
 y_dim = train_y.shape[1]  # Y维度：202（101维实部 + 101维虚部）
-z_dim = x_dim             # Z维度：5（与X维度相同）
+z_dim = 1                 # Z维度：1（修改为1维）
 
 # 左侧输入：X + 零填充 → 总维度 = x_dim + padding_dim = 5 + 202 = 207
 padding_dim = y_dim
 left_input_dim = x_dim + padding_dim
 
-# 右侧输入：Y + Z → 总维度 = y_dim + z_dim = 202 + 5 = 207
+# 右侧输入：Y + Z → 总维度 = y_dim + z_dim = 202 + 1 = 203
 right_input_dim = y_dim + z_dim
 
 print(f'X维度: {x_dim}, Y维度: {y_dim}, Z维度: {z_dim}')
 print(f'左侧输入维度: {left_input_dim} (X: {x_dim} + 零填充: {padding_dim})')
 print(f'右侧输入维度: {right_input_dim} (Y: {y_dim} + Z: {z_dim})')
-print(f'总输入/输出维度: {left_input_dim} (左右侧维度相同)')
+print(f'总输入/输出维度: {left_input_dim} (左侧维度)')
 
 # 配置affine coupling比率，根据X和Y的维度调整
 if config['model_config']['ratio_x1_x2_inAffine'] is None:
@@ -366,7 +366,7 @@ from R_INN_model.loss_methods import mmd_loss, nmse_loss, weighted_nmse_loss
 
 # 创建可逆模型（密度估计任务）
 model = RINNModel(
-    input_dim=left_input_dim,  # 模型输入/输出维度：左右侧维度相同
+    input_dim=left_input_dim,  # 模型输入/输出维度：左侧维度
     hidden_dim=config['model_config']['hidden_dim'],  # 从配置中获取hidden_dim，提高模型拟合能力
     num_blocks=config['model_config']['num_blocks'],   # 从配置中获取num_blocks，增强模型表达能力
     num_stages=config['model_config']['num_stages'],   # 从配置中获取num_stages，控制模型深度
@@ -490,11 +490,6 @@ def calculate_loss(left_input, right_input):
     # 从reconstructed_left中提取X'（前x_dim维度）
     real_x = left_input[:, :x_dim]
     reconstructed_x = reconstructed_left[:, :x_dim]
-    
-    # 使用NMSE损失，使量纲与其他损失项一致
-    # x_mse = torch.mean((real_x - reconstructed_x) ** 2)
-    # x_rms = torch.sqrt(torch.mean(real_x ** 2) + 1e-8)
-    # x_loss = x_mse / (x_rms ** 2 + 1e-8)
     
     # 使用MMD损失计算x损失
     x_loss = mmd_loss(real_x, reconstructed_x)
@@ -1186,18 +1181,12 @@ with torch.no_grad():
 
 # 计算每个预测的Y与原始Y的NMSE
 nmse_errors = []
-y_variance = np.var(y_test_original[0])  # 计算原始Y的方差
+y_variance = np.var(y_test_original[0])
 
 for i in range(num_samples):
     mse = np.mean((predicted_y[i] - y_test_original[0]) ** 2)
     nmse = mse / (y_variance + 1e-8)
     nmse_errors.append(nmse)
-    
-    if i < 5:
-        print(f'  Solution {i+1} NMSE: {nmse:.6f}')
-
-if num_samples > 5:
-    print(f'  ... and {num_samples - 5} more solutions')
 
 # 排序NMSE，获取统计信息
 nmse_errors = np.array(nmse_errors)
@@ -1236,105 +1225,50 @@ plt.close()
 # 可视化：X分布 + NMSE分布 + Top 5 Y预测
 fig = plt.figure(figsize=(16, 12))
 
-# 1. X参数分布（2行3列布局）
-for param_idx in range(x_dim):
-    ax = plt.subplot(3, 3, param_idx + 1)
-    ax.hist(reconstructed_xs_clipped[:, param_idx], bins=20, alpha=0.7, color='green', label='Generated X')
-    ax.axvline(real_x[0, param_idx], color='red', linestyle='--', linewidth=2, label='Real X')
-    ax.set_title(f'Parameter {param_idx + 1} Distribution')
-    ax.set_xlabel('Value (mm)')
+# 创建网格布局
+gs = fig.add_gridspec(3, 5, height_ratios=[1, 1, 1], width_ratios=[1, 1, 1, 1, 1])
+
+# 第一行：5个几何参数的分布
+for j in range(x_dim):
+    ax = fig.add_subplot(gs[0, j])
+    ax.hist(reconstructed_xs_clipped[:, j], bins=10, alpha=0.7, color='green', label='Generated X')
+    ax.axvline(real_x[0, j], color='red', linestyle='--', label='Real X')
+    ax.set_title(f'Param {j+1} Distribution')
+    ax.set_xlabel('Value')
     ax.set_ylabel('Count')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-# 2. NMSE分布直方图
-ax_nmse = plt.subplot(3, 3, 6)
-ax_nmse.hist(nmse_errors, bins=30, alpha=0.7, color='blue', edgecolor='black')
-ax_nmse.axvline(np.min(nmse_errors), color='red', linestyle='--', linewidth=2, label=f'Best NMSE: {np.min(nmse_errors):.4f}')
-ax_nmse.axvline(np.mean(nmse_errors), color='orange', linestyle='--', linewidth=2, label=f'Mean NMSE: {np.mean(nmse_errors):.4f}')
-ax_nmse.set_title(f'NMSE Distribution ({num_samples} samples)')
+# 第二行：NMSE分布
+ax_nmse = fig.add_subplot(gs[1, :])
+ax_nmse.hist(nmse_errors, bins=20, alpha=0.7, color='purple', label='NMSE Distribution')
+ax_nmse.axvline(np.min(nmse_errors), color='red', linestyle='--', label='Min NMSE')
+ax_nmse.set_title('NMSE Distribution of Generated Solutions')
 ax_nmse.set_xlabel('NMSE')
 ax_nmse.set_ylabel('Count')
 ax_nmse.legend()
 ax_nmse.grid(True, alpha=0.3)
 
-# 3. Top 5 解的Y预测 - 实部
-ax_re = plt.subplot(3, 1, 2)
-ax_re.plot(freq_data[:101], y_test_original[0, :101], 'blue', linewidth=2.5, label='Original Re(S11)')
-colors = ['red', 'green', 'orange', 'purple', 'brown']
-for rank, idx in enumerate(top_indices):
-    color = colors[rank % len(colors)]
-    ax_re.plot(freq_data[:101], predicted_y[idx, :101], color=color, linestyle='--', 
-               linewidth=1.5, alpha=0.8, label=f'Rank {rank+1} (NMSE: {nmse_errors[idx]:.4f})')
-ax_re.set_xlabel('Frequency (GHz)')
-ax_re.set_ylabel('Re(S11)')
-ax_re.set_title(f'Top 5 Predicted Re(S11) - Best NMSE: {nmse_errors[top_indices[0]]:.6f}')
-ax_re.set_xlim((10.5, 11.5))
-ax_re.legend(loc='upper right', fontsize='small')
-ax_re.grid(True, alpha=0.3)
+# 第三行：Top 5解的Y预测与原始Y对比
+ax_y = fig.add_subplot(gs[2, :])
+ax_y.plot(freq_data[:101], y_test_original[0, :101], 'blue', linewidth=2, label='Original Re(S11)')
 
-# 4. Top 5 解的Y预测 - 虚部
-ax_im = plt.subplot(3, 1, 3)
-ax_im.plot(freq_data[:101], y_test_original[0, 101:], 'green', linewidth=2.5, label='Original Im(S11)')
-for rank, idx in enumerate(top_indices):
-    color = colors[rank % len(colors)]
-    ax_im.plot(freq_data[:101], predicted_y[idx, 101:], color=color, linestyle='--', 
-               linewidth=1.5, alpha=0.8, label=f'Rank {rank+1} (NMSE: {nmse_errors[idx]:.4f})')
-ax_im.set_xlabel('Frequency (GHz)')
-ax_im.set_ylabel('Im(S11)')
-ax_im.set_title(f'Top 5 Predicted Im(S11) - Best NMSE: {nmse_errors[top_indices[0]]:.6f}')
-ax_im.set_xlim((10.5, 11.5))
-ax_im.legend(loc='upper right', fontsize='small')
-ax_im.grid(True, alpha=0.3)
+for i, idx in enumerate(top_indices[:3]):
+    color = ['red', 'green', 'orange'][i]
+    ax_y.plot(freq_data[:101], predicted_y[idx, :101], color=color, linestyle='--', linewidth=1.5, label=f'Top {i+1} Solution')
+
+ax_y.set_title('Top 3 Solutions vs Original Y')
+ax_y.set_xlabel('Frequency (GHz)')
+ax_y.set_ylabel('Re(S11)')
+ax_y.set_xlim((10.5, 11.5))
+ax_y.legend()
+ax_y.grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.savefig(os.path.join(checkpoint_dir, 'multi_solution_analysis.png'), dpi=300, bbox_inches='tight')
 plt.close()
-print(f'\nMulti-solution analysis saved: multi_solution_analysis.png')
 
-# 保存多解生成结果
-np.save(os.path.join(checkpoint_dir, 'generated_xs.npy'), reconstructed_xs)
-np.save(os.path.join(checkpoint_dir, 'predicted_ys.npy'), predicted_y)
-
-# 保存多解生成结果（包含NMSE信息）
-multi_solution_results = {
-    'num_candidates': num_samples,
-    'real_x': real_x[0].tolist(),
-    'x_diversity': {
-        'per_param': diversity.tolist(),
-        'average': float(np.mean(diversity))
-    },
-    'nmse_statistics': {
-        'min': float(np.min(nmse_errors)),
-        'max': float(np.max(nmse_errors)),
-        'mean': float(np.mean(nmse_errors)),
-        'std': float(np.std(nmse_errors)),
-        'median': float(np.median(nmse_errors))
-    },
-    'top_5_solutions': [
-        {
-            'rank': rank + 1,
-            'candidate_idx': int(idx),
-            'nmse': float(nmse_errors[idx]),
-            'predicted_x': reconstructed_xs_clipped[idx].tolist(),
-            'relative_errors': np.abs((reconstructed_xs_clipped[idx] - real_x[0]) / (real_x[0] + 1e-8)).tolist()
-        }
-        for rank, idx in enumerate(top_indices)
-    ],
-    'all_candidates_nmse': nmse_errors.tolist()
-}
-
-with open(os.path.join(checkpoint_dir, 'multi_solution_results.json'), 'w', encoding='utf-8') as f:
-    json.dump(multi_solution_results, f, ensure_ascii=False, indent=2)
-
-print('\n多解生成详细结果已保存到: multi_solution_results.json')
-
-# ============== 计算并保存逆向预测x正确率 ==============
-# 注意：逆向预测x的正确率已经在上面计算并保存过了，这里不再重复计算
-
-# ============== Saving prediction results ==============
-# Note: Prediction results for fixed x predicting y and fixed y backward predicting x have already been saved inside their respective loops
-
-print('\n=== Training completed! ===')
-print(f'Model checkpoints saved in: {checkpoint_dir}')
-print('Prediction results have been saved.')
+print(f'\n多解生成分析完成！')
+print(f'  生成了 {num_samples} 个候选解')
+print(f'  最佳解NMSE: {np.min(nmse_errors):.6f}')
+print(f'  所有分析结果已保存到: {checkpoint_dir}')

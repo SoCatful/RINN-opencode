@@ -17,394 +17,232 @@ plt.rcParams['axes.unicode_minus'] = False
 
 ```python
 # 标准单图
-plt.figure(figsize=(10, 6))
+plt.figure(figsize=(12, 7))
 
-# 对比图
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+# 多子图（用于Y->X参数和曲线）
+plt.figure(figsize=(20, 15))
 
-# 多子图
+# 其他布局
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 ```
 
 ### 1.3 分辨率
 
 ```python
-plt.savefig('figure.png', dpi=300, bbox_inches='tight')
+plt.savefig('figure.png', dpi=300)
 ```
 
 ---
 
-## 2. S参数绘图
+## 2. Y->X 标准绘图范式
 
-### 2.1 标准S11响应图
-
-```python
-def plot_s11_response(freqs, s11_dB, title="S11 Response", save_path=None):
-    """
-    绘制S11响应曲线
-    
-    参数:
-        freqs: 频率数组 [GHz]
-        s11_dB: S11的dB值
-        title: 图标题
-        save_path: 保存路径
-    """
-    plt.figure(figsize=(10, 6))
-    
-    # 绘制曲线
-    plt.plot(freqs, s11_dB, 'b-', linewidth=2, label='S11 (dB)')
-    
-    # 添加参考线
-    plt.axhline(y=-10, color='r', linestyle='--', linewidth=1, label='-10 dB')
-    plt.axhline(y=-20, color='orange', linestyle='--', linewidth=1, label='-20 dB')
-    
-    # 标记通带（假设10.7-11.7 GHz）
-    plt.axvspan(10.7, 11.7, alpha=0.2, color='green', label='Passband')
-    
-    # 设置标签
-    plt.xlabel('Frequency (GHz)', fontsize=12)
-    plt.ylabel('S11 (dB)', fontsize=12)
-    plt.title(title, fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10)
-    
-    # 设置y轴范围（S11为负值，所以反向）
-    plt.ylim(-40, 0)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-```
-
-### 2.2 对比图（预测 vs 真实）
+### 2.1 重建几何参数和曲线图
 
 ```python
-def plot_comparison(freqs, y_true, y_pred, title="Comparison", save_path=None):
+def plot_reconstructed_parameters_and_curves(results, result_dir):
     """
-    对比真实值和预测值
+    生成包含重建几何参数和Re/Im曲线的图
     
     参数:
-        freqs: 频率数组
-        y_true: 真实值
-        y_pred: 预测值
+        results: 包含频率、原始数据和重建数据的字典
+        result_dir: 保存结果的目录
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    freq = results['freq']
     
-    # Re(S11)
-    ax1.plot(freqs, y_true[:, :101], 'b-', linewidth=2, label='True')
-    ax1.plot(freqs, y_pred[:, :101], 'r--', linewidth=2, label='Predicted')
-    ax1.set_xlabel('Frequency (GHz)', fontsize=12)
-    ax1.set_ylabel('Re(S11)', fontsize=12)
-    ax1.set_title('Real Part', fontsize=13)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    # 加载几何参数范围
+    param_ranges = {}
+    if os.path.exists('geometry_params_ranges.json'):
+        with open('geometry_params_ranges.json', 'r') as f:
+            param_ranges = json.load(f)
     
-    # Im(S11)
-    ax2.plot(freqs, y_true[:, 101:], 'b-', linewidth=2, label='True')
-    ax2.plot(freqs, y_pred[:, 101:], 'r--', linewidth=2, label='Predicted')
-    ax2.set_xlabel('Frequency (GHz)', fontsize=12)
-    ax2.set_ylabel('Im(S11)', fontsize=12)
-    ax2.set_title('Imaginary Part', fontsize=13)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    # 参数名称
+    params = ['H1', 'H2', 'H3', 'H_C1', 'H_C2']
     
-    fig.suptitle(title, fontsize=16)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-```
-
-### 2.3 误差图
-
-```python
-def plot_error_heatmap(errors, title="Error Distribution", save_path=None):
-    """
-    绘制误差热图
-    
-    参数:
-        errors: 误差矩阵 [samples, features]
-    """
-    plt.figure(figsize=(12, 6))
-    
-    im = plt.imshow(errors, aspect='auto', cmap='RdYlBu_r', interpolation='nearest')
-    plt.colorbar(im, label='Error')
-    
-    plt.xlabel('Feature Index', fontsize=12)
-    plt.ylabel('Sample Index', fontsize=12)
-    plt.title(title, fontsize=14)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-```
-
----
-
-## 3. 训练过程绘图
-
-### 3.1 损失曲线
-
-```python
-def plot_training_history(history, save_path=None):
-    """
-    绘制训练历史
-    
-    参数:
-        history: 字典，包含 'train_loss', 'val_loss', 'epoch'
-    """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
-    
-    # 损失曲线
-    ax1.plot(history['epoch'], history['train_loss'], 'b-', linewidth=2, label='Train Loss')
-    ax1.plot(history['epoch'], history['val_loss'], 'r-', linewidth=2, label='Val Loss')
-    ax1.set_xlabel('Epoch', fontsize=12)
-    ax1.set_ylabel('Loss', fontsize=12)
-    ax1.set_title('Training History', fontsize=14)
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 学习率曲线（如果有）
-    if 'lr' in history:
-        ax2.plot(history['epoch'], history['lr'], 'g-', linewidth=2)
-        ax2.set_xlabel('Epoch', fontsize=12)
-        ax2.set_ylabel('Learning Rate', fontsize=12)
-        ax2.set_title('Learning Rate Schedule', fontsize=14)
+    # 为每个数据类型生成图
+    for data_type in ['original', 'negative', 'symmetric']:
+        if data_type not in results:
+            continue
+        
+        data = results[data_type]
+        reconstructed_x = data['reconstructed_x']
+        real_part = data['real']
+        imag_part = data['imag']
+        predicted_real = data['predicted_real']
+        predicted_imag = data['predicted_imag']
+        nmse = data.get('nmse', 0)
+        
+        # 创建图：5个几何参数子图（横向排列） + 2个曲线子图（纵向排列）
+        fig = plt.figure(figsize=(20, 15))
+        
+        # 创建整个图表的网格布局
+        gs = fig.add_gridspec(3, 5, height_ratios=[1, 1, 1], width_ratios=[1, 1, 1, 1, 1])
+        
+        # 创建5个几何参数子图（第一行横向排列）
+        param_axes = []
+        for i, (param, value) in enumerate(zip(params, reconstructed_x)):
+            ax = fig.add_subplot(gs[0, i])
+            param_axes.append(ax)
+            
+            # 绘制竖线代表数轴
+            ax.axvline(x=0.5, color='black', linewidth=1)
+            
+            # 获取参数范围
+            if param in param_ranges:
+                y_min = param_ranges[param]['min']
+                y_max = param_ranges[param]['max']
+                
+                # 绘制上下界参考线
+                ax.axhline(y=y_min, xmin=0.2, xmax=0.8, color='green', linestyle='--', linewidth=1, label=f'{param} min')
+                ax.axhline(y=y_max, xmin=0.2, xmax=0.8, color='red', linestyle='--', linewidth=1, label=f'{param} max')
+                
+                # 绘制取值（空心圆圈）
+                if value < y_min or value > y_max:
+                    # 超出范围，用橙色圆圈
+                    ax.scatter(0.5, value, s=100, facecolors='none', edgecolors='orange', linewidths=2, label=f'{param} Value')
+                    # 添加文本标注
+                    ax.text(0.5, value, f'Out of range', 
+                             ha='center', va='bottom' if value > y_max else 'top',
+                             fontsize=8, color='red')
+                else:
+                    # 在范围内，用蓝色圆圈
+                    ax.scatter(0.5, value, s=100, facecolors='none', edgecolors='blue', linewidths=2, label=f'{param} Value')
+                
+                # 设置Y轴范围
+                ax.set_ylim([y_min * 0.95, y_max * 1.05])
+            
+            # 设置子图属性
+            ax.set_title(f'{param}', fontsize=12)
+            ax.set_ylabel('Parameter Value (mm)', fontsize=10)
+            ax.set_xticks([])
+            ax.set_xlim([0, 1])
+            
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3, axis='y')
+        
+        # 创建实部曲线子图（第二行，跨越所有5列）
+        ax2 = fig.add_subplot(gs[1, :])
+        ax2.plot(freq/1e9, real_part, 'blue', linewidth=2, label='Original Re(S11)')
+        ax2.plot(freq/1e9, predicted_real, 'red', linestyle='--', linewidth=2, label='Predicted Re(S11)')
+        ax2.set_xlabel('Frequency (GHz)')
+        ax2.set_ylabel('Re(S11)')
+        ax2.set_title(f'Real Part Comparison ({data_type} data)')
+        ax2.set_xlim([10.5, 11.5])
+        ax2.legend()
         ax2.grid(True, alpha=0.3)
-        ax2.set_yscale('log')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
+        
+        # 创建虚部曲线子图（第三行，跨越所有5列）
+        ax3 = fig.add_subplot(gs[2, :])
+        ax3.plot(freq/1e9, imag_part, 'blue', linewidth=2, label='Original Im(S11)')
+        ax3.plot(freq/1e9, predicted_imag, 'red', linestyle='--', linewidth=2, label='Predicted Im(S11)')
+        ax3.set_xlabel('Frequency (GHz)')
+        ax3.set_ylabel('Im(S11)')
+        ax3.set_title(f'Imaginary Part Comparison ({data_type} data)')
+        ax3.set_xlim([10.5, 11.5])
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 设置整个图表的标题
+        fig.suptitle(f'Reconstructed Geometry Parameters and S11 Curves ({data_type} data)\nBest NMSE: {nmse:.6f}', fontsize=16, y=0.98)
+        
+        # 调整布局
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        save_path = os.path.join(result_dir, f'{data_type}_parameters_and_curves.png')
+        plt.savefig(save_path, dpi=300)
+        plt.close()
+        
+        print(f'Saved {data_type} parameters and curves plot to {save_path}')
 ```
 
----
-
-## 4. 几何参数可视化
-
-### 4.1 参数分布图
+### 2.2 S11值图
 
 ```python
-def plot_param_distribution(X, param_names=None, save_path=None):
+def plot_s11_values(results, result_dir):
     """
-    绘制几何参数分布
+    生成包含S11值的图
     
     参数:
-        X: 几何参数矩阵 [samples, 8]
-        param_names: 参数名称列表
+        results: 包含频率、原始S11和预测S11的字典
+        result_dir: 保存结果的目录
     """
-    if param_names is None:
-        param_names = ['a1', 'a2', 'a3', 'a4', 'a5', 'l1', 'l2', 'l3']
+    freq = results['freq']
     
-    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-    axes = axes.flatten()
-    
-    for i in range(8):
-        axes[i].hist(X[:, i], bins=30, edgecolor='black', alpha=0.7)
-        axes[i].set_xlabel(param_names[i], fontsize=10)
-        axes[i].set_ylabel('Count', fontsize=10)
-        axes[i].grid(True, alpha=0.3)
-    
-    fig.suptitle('Geometry Parameters Distribution', fontsize=16)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
+    # 为每个数据类型生成图
+    for data_type in ['original', 'negative', 'symmetric']:
+        if data_type not in results:
+            continue
+        
+        data = results[data_type]
+        original_s11 = data['original_s11']
+        predicted_s11 = data['predicted_s11']
+        
+        # 创建图
+        plt.figure(figsize=(12, 7))
+        
+        plt.plot(freq/1e9, original_s11, 'blue', linewidth=2, label='Original S11 (dB)')
+        plt.plot(freq/1e9, predicted_s11, 'red', linestyle='--', linewidth=2, label='Predicted S11 (dB)')
+        
+        # 通带阴影
+        plt.axvspan(10.85, 11.15, color='green', alpha=0.15, label='Passband(10.85-11.15GHz)')
+        
+        # 坐标与样式
+        plt.xlim(10.5, 11.5)
+        plt.ylim(-60, 0)
+        plt.xlabel('Frequency (GHz)', fontsize=14)
+        plt.ylabel('S11 (dB)', fontsize=14)
+        plt.title(f'S11 Comparison ({data_type} data)', fontsize=16)
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.legend(fontsize=12)
+        plt.tight_layout()
+        
+        # 保存图
+        save_path = os.path.join(result_dir, f'{data_type}_s11.png')
+        plt.savefig(save_path, dpi=300)
+        plt.close()
+        
+        print(f'Saved {data_type} S11 plot to {save_path}')
 ```
 
-### 4.2 参数相关性热图
+### 2.3 数据类型处理
 
 ```python
-def plot_correlation_matrix(X, param_names=None, save_path=None):
+def generate_ideal_data():
     """
-    绘制参数相关性矩阵
+    生成理想数据和变换后的数据
+    
+    返回:
+        包含频率、原始数据和变换后数据的字典
     """
-    import seaborn as sns
+    from filter_ideal.core import filter_configs
     
-    if param_names is None:
-        param_names = ['a1', 'a2', 'a3', 'a4', 'a5', 'l1', 'l2', 'l3']
+    # 生成理想响应
+    cfg = filter_configs[0]
+    result = generate_ideal_response(cfg, result_dir='result_ideal_transformed')
     
-    corr_matrix = np.corrcoef(X.T)
+    # 获取原始数据和变换后的数据
+    freq = result['freq']
+    S11_real = result['S11_real']
+    S11_imag = result['S11_imag']
+    transformed_data = result['transformed_data']
     
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(corr_matrix, annot=True, fmt='.2f', 
-                xticklabels=param_names, yticklabels=param_names,
-                cmap='coolwarm', center=0, vmin=-1, vmax=1)
-    plt.title('Parameter Correlation Matrix', fontsize=14)
-    plt.tight_layout()
+    # 提取变换后的数据
+    S11_real_neg = transformed_data['negative']['real']
+    S11_imag_neg = transformed_data['negative']['imag']
+    S11_real_sym = transformed_data['symmetric']['real']
+    S11_imag_sym = transformed_data['symmetric']['imag']
     
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
+    return {
+        'freq': freq,
+        'original': {
+            'real': S11_real,
+            'imag': S11_imag
+        },
+        'negative': {
+            'real': S11_real_neg,
+            'imag': S11_imag_neg
+        },
+        'symmetric': {
+            'real': S11_real_sym,
+            'imag': S11_imag_sym
+        }
+    }
 ```
-
----
-
-## 5. 性能指标绘图
-
-### 5.1 NMSE分布
-
-```python
-def plot_nmse_distribution(nmse_list, title="NMSE Distribution", save_path=None):
-    """
-    绘制NMSE分布直方图
-    """
-    plt.figure(figsize=(10, 6))
-    
-    plt.hist(nmse_list, bins=50, edgecolor='black', alpha=0.7)
-    plt.axvline(np.mean(nmse_list), color='r', linestyle='--', 
-                linewidth=2, label=f'Mean: {np.mean(nmse_list):.4f}')
-    plt.axvline(np.median(nmse_list), color='orange', linestyle='--',
-                linewidth=2, label=f'Median: {np.median(nmse_list):.4f}')
-    
-    plt.xlabel('NMSE', fontsize=12)
-    plt.ylabel('Count', fontsize=12)
-    plt.title(title, fontsize=14)
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-```
-
-### 5.2 散点图（预测 vs 真实）
-
-```python
-def plot_scatter(y_true, y_pred, title="Prediction vs True", save_path=None):
-    """
-    绘制预测值vs真实值散点图
-    """
-    plt.figure(figsize=(8, 8))
-    
-    plt.scatter(y_true, y_pred, alpha=0.5, s=20)
-    
-    # 对角线（完美预测线）
-    min_val = min(y_true.min(), y_pred.min())
-    max_val = max(y_true.max(), y_pred.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
-    
-    plt.xlabel('True Values', fontsize=12)
-    plt.ylabel('Predicted Values', fontsize=12)
-    plt.title(title, fontsize=14)
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.axis('equal')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-```
-
----
-
-## 6. 颜色规范
-
-### 6.1 推荐配色
-
-```python
-# 主色
-colors = {
-    'primary': '#1f77b4',      # 蓝色
-    'secondary': '#ff7f0e',    # 橙色
-    'success': '#2ca02c',      # 绿色
-    'danger': '#d62728',       # 红色
-    'warning': '#ffbb78',      # 黄色
-    'info': '#17becf',         # 青色
-    'true': '#1f77b4',         # 真实值 - 蓝
-    'pred': '#ff7f0e',         # 预测值 - 橙
-}
-```
-
-### 6.2 多线图配色
-
-```python
-# 使用tab10配色
-colors = plt.cm.tab10(np.linspace(0, 1, 10))
-
-# 或使用自定义配色
-colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
-          '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-```
-
----
-
-## 7. 保存规范
-
-### 7.1 图片格式
-
-- **PNG**: 用于演示、文档
-- **PDF**: 用于论文、印刷
-- **SVG**: 用于网页、可编辑
-
-### 7.2 命名规范
-
-```
-{类型}_{内容}_{日期}.{格式}
-
-示例：
-- s11_response_comparison_20240214.png
-- training_loss_history_20240214.pdf
-- param_distribution_a1_a5_20240214.svg
-```
-
-### 7.3 存储位置
-
-```
-results/
-├── figures/
-│   ├── training/          # 训练相关图
-│   ├── evaluation/        # 评估相关图
-│   ├── comparison/        # 对比图
-│   └── analysis/          # 分析图
-└── data/                  # 数据文件
-```
-
----
-
-## 8. 代码组织
-
-### 8.1 绘图函数库
-
-建议创建 `utils/plotting.py`：
-
-```python
-"""
-绘图工具函数库
-"""
-import matplotlib.pyplot as plt
-import numpy as np
-
-# 设置全局样式
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
-plt.rcParams['figure.dpi'] = 100
-
-def plot_s11_response(...):
-    """绘制S11响应"""
-    pass
-
-def plot_comparison(...):
-    """绘制对比图"""
-    pass
-
-# ... 其他函数
-```
-
----
-
-*文档编号: 04*  
-*创建日期: 2026-02-14*  
-*主题: 绘图规范*
