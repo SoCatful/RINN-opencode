@@ -1,0 +1,18 @@
+贝叶斯优化结果
+时间戳: 20260215_130926
+尝试次数: 5
+最佳验证损失: 0.431244
+最佳参数: {
+  "hidden_dim": 64,
+  "num_blocks": 8,
+  "num_stages": 3,
+  "num_cycles_per_stage": 2,
+  "ratio_toZ_after_flowstage": 0.19361118426546192,
+  "ratio_x1_x2_inAffine": 0.1201975341512912,
+  "batch_size": 32,
+  "learning_rate": 0.0002607024758370766,
+  "weight_decay": 1.0994335574766194e-06,
+  "weight_y": 1.9548647782429915,
+  "weight_x": 0.8491983767203796,
+  "weight_z": 0.18493564427131048
+}

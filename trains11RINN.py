@@ -200,7 +200,8 @@ print(f'训练集总样本数: {len(train_x)}')
 
 # 加载验证集数据
 print('\n=== 加载验证集数据 ===')
-val_files = ['data/S Parameter Plot1perfect.csv']
+# 使用5个样本作为验证集，确保包含perfect.csv
+val_files = ['data/S Parameter Plot1perfect.csv', 'data/S Parameter Plot200.csv', 'data/S Parameter Plot300.csv']
 val_x = []
 val_y = []
 
@@ -213,10 +214,11 @@ for file_path in val_files:
 val_x = np.vstack(val_x)
 val_y = np.vstack(val_y)
 
-# 确保验证集只包含一个元素
-if len(val_x) > 1:
-    val_x = val_x[:1]
-    val_y = val_y[:1]
+# 确保验证集包含5个样本
+if len(val_x) > 5:
+    # 确保包含perfect.csv中的样本
+    val_x = val_x[:5]
+    val_y = val_y[:5]
 print(f'验证集样本数: {len(val_x)}')
 
 print(f'\n训练集样本数: {len(train_x)}')
@@ -467,8 +469,8 @@ def calculate_loss(left_input, right_input):
     """计算正确的RINN损失
     核心：
     1. 正向预测的Y'和真实Y的加权NMSE损失
-    2. 重建X的损失
-    3. 正向预测的Z'和标准高斯分布的MMD差异
+    2. 正向预测的Z'和标准正态分布的MMD差异
+    3. 随机生成Z，拼接Y回推X，对X使用MMD损失
     """
     # 正向映射：left_input → predicted_right
     predicted_right, log_det_forward, _ = model(left_input, return_intermediate=True)
@@ -483,25 +485,29 @@ def calculate_loss(left_input, right_input):
     # 1. Y预测损失：加权NMSE
     y_loss = weighted_nmse_loss(real_y, predicted_y)
     
-    # 2. X重建损失：从predicted_right重建X
-    # 反向映射：predicted_right → reconstructed_left
-    reconstructed_left, log_det_backward = model.inverse(predicted_right)
+    # 2. Z分布约束：predicted_z与标准高斯分布的MMD差异
+    z_target = torch.randn_like(predicted_z).to(device)  # 标准高斯分布
+    z_loss = mmd_loss(predicted_z, z_target)
     
-    # 从reconstructed_left中提取X'（前x_dim维度）
-    real_x = left_input[:, :x_dim]
+    # 3. 随机生成Z，拼接Y回推X，计算X的MMD损失
+    # 随机生成一批Z
+    batch_size = left_input.size(0)
+    random_z = torch.randn(batch_size, z_dim).to(device)
+    
+    # 拼接Y和随机生成的Z
+    right_input_random_z = torch.cat((real_y, random_z), dim=1)
+    
+    # 反向映射：Y+Z → X+0填充
+    reconstructed_left, _ = model.inverse(right_input_random_z)
+    
+    # 从reconstructed_left中提取X'
     reconstructed_x = reconstructed_left[:, :x_dim]
     
-    # 使用NMSE损失，使量纲与其他损失项一致
-    # x_mse = torch.mean((real_x - reconstructed_x) ** 2)
-    # x_rms = torch.sqrt(torch.mean(real_x ** 2) + 1e-8)
-    # x_loss = x_mse / (x_rms ** 2 + 1e-8)
+    # 从left_input中提取真实X
+    real_x = left_input[:, :x_dim]
     
     # 使用MMD损失计算x损失
     x_loss = mmd_loss(real_x, reconstructed_x)
-    
-    # 3. Z分布约束：predicted_z与标准高斯分布的MMD差异
-    z_target = torch.randn_like(predicted_z).to(device)  # 标准高斯分布
-    z_loss = mmd_loss(predicted_z, z_target)
     
     # 总损失：组合三个损失项
     total_loss = weight_y * y_loss + weight_x * x_loss + weight_z * z_loss
