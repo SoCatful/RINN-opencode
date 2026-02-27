@@ -1,0 +1,8 @@
+Best Validation Loss: 0.068001
+Training Time: 0:02:51.978486
+Validation Set Average NMSE: 0.121057
+
+=== Multi-Z Backward Prediction Results (500 candidates) ===
+Average Best NMSE: 0.322207
+Backward Prediction Avg Relative Error: 0.022873
+Backward Prediction Accuracy: 0.977127

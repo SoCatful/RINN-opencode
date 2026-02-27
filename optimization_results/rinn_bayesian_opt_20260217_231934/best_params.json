@@ -1,0 +1,14 @@
+{
+  "hidden_dim": 64,
+  "num_blocks": 8,
+  "num_stages": 3,
+  "num_cycles_per_stage": 3,
+  "ratio_toZ_after_flowstage": 0.19603230879493147,
+  "ratio_x1_x2_inAffine": 0.4853786428335901,
+  "batch_size": 32,
+  "learning_rate": 0.00038737899221792676,
+  "weight_decay": 1.457613103947347e-06,
+  "weight_y": 0.6319464744070005,
+  "weight_x": 0.8850907885123918,
+  "weight_z": 0.1345475687277083
+}

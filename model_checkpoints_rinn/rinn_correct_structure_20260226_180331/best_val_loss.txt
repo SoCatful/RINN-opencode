@@ -1,0 +1,5 @@
+
+=== Multi-Z Backward Prediction Results (500 candidates) ===
+Average Best NMSE: 0.976111
+Backward Prediction Avg Relative Error: 0.030922
+Backward Prediction Accuracy: 0.969078

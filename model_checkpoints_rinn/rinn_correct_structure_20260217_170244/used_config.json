@@ -1,0 +1,26 @@
+{
+  "model_config": {
+    "hidden_dim": 64,
+    "num_blocks": 8,
+    "num_stages": 3,
+    "num_cycles_per_stage": 2,
+    "ratio_toZ_after_flowstage": 0.194,
+    "ratio_x1_x2_inAffine": 0.12
+  },
+  "training_params": {
+    "batch_size": 32,
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 0.000261,
+    "weight_decay": 1.1e-06,
+    "clip_value": 0.5,
+    "num_epochs": 10,
+    "loss_weights": {
+      "weight_y": 1.955,
+      "weight_x": 0.849,
+      "weight_z": 0.185
+    }
+  },
+  "data_params": {
+    "normalization_method": "robust"
+  }
+}
